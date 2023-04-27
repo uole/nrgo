@@ -92,7 +92,7 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 func (sess *Session) Receive(ctx context.Context) {
 	sess.conn.IoLoop(ctx)
 	atomic.StoreInt32(&sess.State, StateUnavailable)
-	log.Infof("session %s already closed", sess.ID)
+	log.Infof("session %s closed", sess.ID)
 }
 
 func (sess *Session) Close() (err error) {

@@ -195,6 +195,7 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 	if err = svr.lookupServeInfo(svr.ctx); err != nil {
 		return
 	}
+	svr.routes()
 	svr.waitGroup.Go(svr.checkStatus)
 	svr.waitGroup.Go(svr.eventLoop)
 	return
