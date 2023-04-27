@@ -1,0 +1,184 @@
+package nrgo
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"git.nspix.com/golang/kos/util/pool"
+	"github.com/quic-go/quic-go"
+	goroutinePool "github.com/sourcegraph/conc/pool"
+	"github.com/uole/nrgo/pkg/packet"
+	"io"
+	"net"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	defaultTimeout = time.Second * 5
+)
+
+const (
+	defaultBufferSize = 16 * 1024
+)
+
+type Connection struct {
+	conn          quic.Connection
+	seq           uint16
+	info          *NodeInfo
+	dialer        net.Dialer
+	goroutinePool *goroutinePool.Pool
+	concurrency   int32
+	closeFlag     int32
+	closeChan     chan struct{}
+}
+
+func (conn *Connection) handshake(stream quic.Stream) (rwc io.ReadWriteCloser, err error) {
+	var (
+		frame   *packet.Frame
+		timeout time.Duration
+	)
+	if frame, err = packet.ReadFrame(stream); err != nil {
+		return
+	}
+	if frame.Type != packet.TypeHandshakeRequest {
+		return nil, fmt.Errorf("unsupported frame type %v", frame.Type)
+	}
+	req := &packet.HandshakeRequest{}
+	if err = json.Unmarshal(frame.Buf, req); err != nil {
+		return
+	}
+	timeout = req.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	res := &packet.HandshakeResponse{
+		Host: req.Host,
+	}
+	if rwc, err = net.DialTimeout("tcp", req.Host, timeout); err == nil {
+		res.Success = true
+		err = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, frame.Sequence, res))
+	} else {
+		res.Reason = err.Error()
+		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, frame.Sequence, res))
+	}
+	return
+}
+
+func (conn *Connection) pipe(dst, src io.ReadWriteCloser, ch chan<- error) {
+	var (
+		err error
+	)
+	buf := pool.GetBytes(defaultBufferSize)
+	defer pool.PutBytes(buf)
+	_, err = io.CopyBuffer(dst, src, buf)
+	select {
+	case ch <- err:
+	}
+	return
+}
+
+func (conn *Connection) process(local quic.Stream) {
+	var (
+		err    error
+		remote io.ReadWriteCloser
+	)
+	atomic.AddInt32(&conn.concurrency, 1)
+	defer func() {
+		err = local.Close()
+		atomic.AddInt32(&conn.concurrency, -1)
+	}()
+	if remote, err = conn.handshake(local); err != nil {
+		return
+	}
+	defer func() {
+		err = remote.Close()
+	}()
+	errChan := make(chan error, 2)
+	conn.goroutinePool.Go(func() {
+		conn.pipe(remote, local, errChan)
+	})
+	conn.goroutinePool.Go(func() {
+		conn.pipe(local, remote, errChan)
+	})
+	select {
+	case <-conn.closeChan:
+		err = io.ErrClosedPipe
+	case err = <-errChan:
+	}
+	return
+}
+
+func (conn *Connection) Dial(ctx context.Context, addr string) (err error) {
+	var (
+		buf   []byte
+		frame *packet.Frame
+	)
+	if conn.conn, err = quic.DialAddrContext(ctx, addr, &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"DESeOlBg1dK"},
+	}, &quic.Config{
+		MaxIdleTimeout:        time.Second * 80,
+		EnableDatagrams:       true,
+		MaxIncomingStreams:    1024,
+		MaxIncomingUniStreams: 1024,
+	}); err != nil {
+		return
+	}
+	conn.seq++
+	req := &packet.RegisterRequest{
+		ID:      conn.info.ID,
+		Name:    conn.info.Name,
+		Country: conn.info.Country,
+		IP:      conn.info.IP,
+		CPU:     conn.info.CPU,
+		Uptime:  conn.info.Uptime,
+	}
+	if err = conn.conn.SendMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.seq, req).Bytes()); err != nil {
+		return
+	}
+	if buf, err = conn.conn.ReceiveMessage(); err != nil {
+		return
+	}
+	if frame, err = packet.ReadFrame(bytes.NewReader(buf)); err != nil {
+		return
+	}
+	res := &packet.RegisterResponse{}
+	if err = json.Unmarshal(frame.Buf, res); err != nil {
+		return
+	}
+	if !res.Success {
+		err = errors.New(res.Reason)
+	}
+	return
+}
+
+func (conn *Connection) Close() (err error) {
+	if !atomic.CompareAndSwapInt32(&conn.closeFlag, 0, 1) {
+		return
+	}
+	close(conn.closeChan)
+	conn.goroutinePool.Wait()
+	return conn.conn.CloseWithError(100, io.ErrClosedPipe.Error())
+}
+
+func (conn *Connection) IoLoop(ctx context.Context) {
+	for {
+		if stream, err := conn.conn.AcceptStream(ctx); err != nil {
+			break
+		} else {
+			go conn.process(stream)
+		}
+	}
+}
+
+func NewConnection(info *NodeInfo) *Connection {
+	return &Connection{
+		info:          info,
+		goroutinePool: goroutinePool.New().WithMaxGoroutines(2048),
+		closeChan:     make(chan struct{}),
+	}
+}
