@@ -160,7 +160,9 @@ func (svr *Server) checkStatus() {
 					log.Warnf("session %s close timeout connection error: %s", sess.ID, err.Error())
 				}
 			}
-		} else {
+		}
+		// if session is closed, try reconnecting to server
+		if !sess.IsEqual(StateReady) {
 			if err = sess.Connect(svr.ctx); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
