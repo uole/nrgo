@@ -2,6 +2,8 @@ package nrgo
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
 	"github.com/quic-go/quic-go"
 	"github.com/uole/nrgo/pkg/packet"
@@ -14,6 +16,10 @@ const (
 	StatePadding     = 0x01
 	StateReady       = 0x02
 	StateUnavailable = 0x03
+)
+
+var (
+	ErrConnecting = errors.New("already connecting")
 )
 
 type Session struct {
@@ -71,10 +77,11 @@ func (sess *Session) IsEqual(state int32) bool {
 
 func (sess *Session) Connect(ctx context.Context) (err error) {
 	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
-		return
+		return ErrConnecting
 	}
-	if time.Now().Sub(sess.LastAttemptTime).Minutes() < math.Pow(float64(sess.Tires), 2) {
-		return
+	duration := time.Now().Sub(sess.LastAttemptTime)
+	if duration.Minutes() < math.Pow(float64(sess.Tires), 2) {
+		return fmt.Errorf("%s are left until the next connection", duration)
 	}
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding

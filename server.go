@@ -53,10 +53,7 @@ func (svr *Server) extGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
 			ctx,
 			env.Get("NRGO_GEO_URL", "https://api.ip.sb/geoip"),
 			info,
-			fetch.WithHeader(
-				map[string]string{
-					"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36",
-				}),
+			fetch.WithHuman(),
 		)
 	},
 		retry.Attempts(3),
@@ -188,6 +185,8 @@ func (svr *Server) eventLoop() {
 }
 
 func (svr *Server) Start(ctx context.Context) (err error) {
+	os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
+	os.Setenv("QUIC_GO_LOG_LEVEL", "error")
 	svr.ctx, svr.cancelFunc = context.WithCancel(ctx)
 	if err = svr.prepare(svr.ctx); err != nil {
 		return
