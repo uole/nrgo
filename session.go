@@ -79,13 +79,13 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
 		return ErrConnecting
 	}
+	defer atomic.StoreInt32(&sess.Connecting, 0)
 	duration := time.Now().Sub(sess.LastAttemptTime)
 	if duration.Minutes() < math.Pow(float64(sess.Tires), 2) {
 		return fmt.Errorf("%s are left until the next connection", duration)
 	}
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding
-	defer atomic.StoreInt32(&sess.Connecting, 0)
 	sess.conn = NewConnection(sess.info)
 	if err = sess.conn.Dial(ctx, sess.Address); err == nil {
 		sess.State = StateReady
