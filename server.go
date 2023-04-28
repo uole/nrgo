@@ -154,7 +154,7 @@ func (svr *Server) checkStatus() {
 		if sess.IsEqual(StateReady) {
 			sess.Ping(svr.ctx)
 			duration := time.Now().Sub(sess.HeartbeatTime)
-			if duration > time.Minute*3 {
+			if duration > time.Second*150 {
 				log.Warnf("session %s heartbeat timeout %s", sess.ID, duration)
 				if err = sess.Close(); err != nil {
 					log.Warnf("session %s close timeout connection error: %s", sess.ID, err.Error())
@@ -172,7 +172,7 @@ func (svr *Server) checkStatus() {
 }
 
 func (svr *Server) eventLoop() {
-	ticker := time.NewTicker(time.Second * 60)
+	ticker := time.NewTicker(time.Second * 45)
 	defer ticker.Stop()
 	for {
 		select {
