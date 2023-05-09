@@ -61,6 +61,7 @@ func (sess *Session) updateSecretKey(key []byte) {
 		copy(sess.secretKey[:], key[:])
 		atomic.StoreInt32(&sess.Tires, 0)
 		_ = sess.Close()
+		log.Debugf("session %s secret key updated", sess.ID)
 	}
 }
 
@@ -70,6 +71,7 @@ func (sess *Session) updateAddress(proto string, address string) {
 		sess.Address = address
 		atomic.StoreInt32(&sess.Tires, 0)
 		_ = sess.Close()
+		log.Debugf("session %s address updated", sess.ID)
 	}
 }
 
@@ -101,14 +103,17 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 }
 
 func (sess *Session) Receive(ctx context.Context) {
-	sess.conn.IoLoop(ctx)
-	atomic.StoreInt32(&sess.State, StateUnavailable)
-	log.Infof("session %s closed", sess.ID)
+	if err := sess.conn.IoLoop(ctx); err != nil {
+		log.Warnf("session %s io error: %s", sess.ID, err.Error())
+		err = sess.Close()
+	}
 }
 
 func (sess *Session) Close() (err error) {
 	if atomic.CompareAndSwapInt32(&sess.State, StateReady, StateUnavailable) {
+		log.Debugf("session %s closing", sess.ID)
 		err = sess.conn.Close()
+		log.Debugf("session %s closed", sess.ID)
 	}
 	return
 }

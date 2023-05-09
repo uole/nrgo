@@ -199,10 +199,10 @@ func (conn *Connection) Close() (err error) {
 	return conn.conn.Close()
 }
 
-func (conn *Connection) IoLoop(ctx context.Context) {
+func (conn *Connection) IoLoop(ctx context.Context) error {
 	for {
 		if stream, err := conn.conn.AcceptStream(ctx); err != nil {
-			break
+			return err
 		} else {
 			go conn.process(stream)
 		}
