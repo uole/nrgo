@@ -85,7 +85,7 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	}
 	defer atomic.StoreInt32(&sess.Connecting, 0)
 	duration := time.Now().Sub(sess.LastAttemptTime)
-	if duration.Minutes() < math.Pow(float64(sess.Tires), 2) {
+	if duration.Seconds() < math.Pow(float64(sess.Tires), 2.5) {
 		return fmt.Errorf("%s are left until the next connection", duration)
 	}
 	atomic.AddInt32(&sess.Tires, 1)
@@ -94,10 +94,10 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	if err = sess.conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
-		log.Debugf("dial %s with %s successful", sess.Proto, sess.Address)
+		log.Debugf("dial %s with %s successful", sess.Address, sess.Proto)
 	} else {
 		sess.LastAttemptTime = time.Now()
-		log.Debugf("dial %s with %s error: %s", sess.Proto, sess.Address, err.Error())
+		log.Debugf("dial %s with %s error: %s", sess.Address, sess.Proto, err.Error())
 	}
 	return
 }
