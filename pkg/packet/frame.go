@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -99,7 +100,7 @@ func WriteFrame(w io.Writer, f *Frame) (err error) {
 	return
 }
 
-func SendRecv(rw io.ReadWriter, f *Frame) (res *Frame, err error) {
+func sendRecv(rw io.ReadWriter, f *Frame) (res *Frame, err error) {
 	if err = WriteFrame(rw, f); err != nil {
 		return
 	}
@@ -108,6 +109,21 @@ func SendRecv(rw io.ReadWriter, f *Frame) (res *Frame, err error) {
 	}
 	if res.Sequence != f.Sequence {
 		err = fmt.Errorf("recv frame sequence not equal %v", f.Sequence)
+	}
+	return
+}
+
+func SendRecv(ctx context.Context, rw io.ReadWriter, f *Frame) (res *Frame, err error) {
+	done := make(chan struct{})
+	go func() {
+		res, err = sendRecv(rw, f)
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+		close(done)
+	case <-ctx.Done():
+		err = ctx.Err()
 	}
 	return
 }

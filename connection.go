@@ -3,16 +3,20 @@ package nrgo
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"git.nspix.com/golang/kos/util/pool"
-	"github.com/quic-go/quic-go"
 	goroutinePool "github.com/sourcegraph/conc/pool"
+	"github.com/uole/nrgo/pkg/multiplex"
+	"github.com/uole/nrgo/pkg/multiplex/kcp"
+	"github.com/uole/nrgo/pkg/multiplex/quic"
+	"github.com/uole/nrgo/pkg/multiplex/tcp"
 	"github.com/uole/nrgo/pkg/packet"
 	"io"
+	"math"
 	"net"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -26,17 +30,19 @@ const (
 )
 
 type Connection struct {
-	conn          quic.Connection
+	secretKey     []byte
+	conn          multiplex.Session
 	seq           uint16
 	info          *NodeInfo
 	dialer        net.Dialer
 	goroutinePool *goroutinePool.Pool
 	concurrency   int32
+	sequence      uint16
 	closeFlag     int32
 	closeChan     chan struct{}
 }
 
-func (conn *Connection) handshake(stream quic.Stream) (rwc io.ReadWriteCloser, err error) {
+func (conn *Connection) handshake(stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
 	var (
 		frame   *packet.Frame
 		timeout time.Duration
@@ -81,7 +87,7 @@ func (conn *Connection) pipe(dst, src io.ReadWriteCloser, ch chan<- error) {
 	return
 }
 
-func (conn *Connection) process(local quic.Stream) {
+func (conn *Connection) process(local multiplex.Stream) {
 	var (
 		err    error
 		remote io.ReadWriteCloser
@@ -112,35 +118,63 @@ func (conn *Connection) process(local quic.Stream) {
 	return
 }
 
-func (conn *Connection) Dial(ctx context.Context, addr string) (err error) {
+func (conn *Connection) Ping(ctx context.Context) (err error) {
+	var (
+		stream multiplex.Stream
+		reply  *packet.Frame
+	)
+	if stream, err = conn.conn.OpenStream(ctx); err != nil {
+		return
+	}
+	defer func() {
+		err = stream.Close()
+	}()
+	if conn.sequence >= math.MaxUint16 {
+		conn.sequence = 0
+	}
+	conn.sequence++
+	if reply, err = packet.SendRecv(ctx, stream, packet.NewFrame(packet.TypeHandshakePing, conn.sequence, packet.PingRequest{Timestamp: time.Now().Unix()})); err == nil {
+		if reply.Type == packet.TypeHandshakePong {
+			return nil
+		}
+	}
+	return
+}
+
+func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error) {
 	var (
 		buf   []byte
 		frame *packet.Frame
 	)
-	if conn.conn, err = quic.DialAddrContext(ctx, addr, &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"DESeOlBg1dK"},
-	}, &quic.Config{
-		MaxIdleTimeout:        time.Second * 80,
-		EnableDatagrams:       true,
-		MaxIncomingStreams:    1024,
-		MaxIncomingUniStreams: 1024,
-	}); err != nil {
+	switch proto {
+	case "quic":
+		conn.conn, err = quic.Dial(ctx, addr)
+	case "kcp":
+		conn.conn, err = kcp.Dial(ctx, addr, func(opts *kcp.Options) {
+			opts.Key = conn.secretKey
+		})
+	default:
+		conn.conn, err = tcp.Dial(ctx, addr, func(opts *tcp.Options) {
+			opts.Key = conn.secretKey
+		})
+	}
+	if err != nil {
 		return
 	}
 	conn.seq++
 	req := &packet.RegisterRequest{
 		ID:      conn.info.ID,
+		OS:      runtime.GOOS,
 		Name:    conn.info.Name,
 		Country: conn.info.Country,
 		IP:      conn.info.IP,
 		CPU:     conn.info.CPU,
 		Uptime:  conn.info.Uptime,
 	}
-	if err = conn.conn.SendMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.seq, req).Bytes()); err != nil {
+	if err = conn.conn.WriteMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.seq, req).Bytes()); err != nil {
 		return
 	}
-	if buf, err = conn.conn.ReceiveMessage(); err != nil {
+	if buf, err = conn.conn.ReadMessage(); err != nil {
 		return
 	}
 	if frame, err = packet.ReadFrame(bytes.NewReader(buf)); err != nil {
@@ -162,7 +196,7 @@ func (conn *Connection) Close() (err error) {
 	}
 	close(conn.closeChan)
 	conn.goroutinePool.Wait()
-	return conn.conn.CloseWithError(100, io.ErrClosedPipe.Error())
+	return conn.conn.Close()
 }
 
 func (conn *Connection) IoLoop(ctx context.Context) {
@@ -175,9 +209,10 @@ func (conn *Connection) IoLoop(ctx context.Context) {
 	}
 }
 
-func NewConnection(info *NodeInfo) *Connection {
+func NewConnection(secretKey []byte, info *NodeInfo) *Connection {
 	return &Connection{
 		info:          info,
+		secretKey:     secretKey,
 		goroutinePool: goroutinePool.New().WithMaxGoroutines(2048),
 		closeChan:     make(chan struct{}),
 	}

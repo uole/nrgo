@@ -2,6 +2,7 @@ package nrgo
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
@@ -11,7 +12,10 @@ import (
 	retry "github.com/avast/retry-go"
 	"github.com/rs/xid"
 	"github.com/sourcegraph/conc"
+	"github.com/uole/nrgo/internal/utils"
+	"github.com/uole/nrgo/pkg/stream"
 	"github.com/uole/nrgo/version"
+	"golang.org/x/crypto/pbkdf2"
 	"os"
 	"path"
 	"runtime"
@@ -29,6 +33,7 @@ type Server struct {
 	serveInfo  *ServeInfo
 	waitGroup  conc.WaitGroup
 	mutex      sync.RWMutex
+	secretKey  []byte
 	sessions   map[string]*Session
 }
 
@@ -101,6 +106,9 @@ func (svr *Server) prepare(ctx context.Context) (err error) {
 }
 
 func (svr *Server) lookupServeInfo(ctx context.Context) (err error) {
+	var (
+		secretKey string
+	)
 	res := &serveInfoResponse{}
 	if err = retry.Do(func() error {
 		if err = fetch.Request(ctx, fmt.Sprintf("https://%s/api/v1/info", svr.domainName()), res); err != nil {
@@ -117,22 +125,26 @@ func (svr *Server) lookupServeInfo(ctx context.Context) (err error) {
 	); err != nil {
 		return
 	}
+	if secretKey, err = utils.DecryptSecret(res.Data.SecretKey); err != nil {
+		return
+	}
+	svr.secretKey = pbkdf2.Key([]byte(secretKey), utils.Salt, 4, stream.BlockSize, sha1.New)
 	svr.mutex.Lock()
 	defer svr.mutex.Unlock()
 	if len(svr.serveInfo.Slaves) > 0 {
 		for _, slave := range svr.serveInfo.Slaves {
 			if sess, ok := svr.sessions[slave.ID]; ok {
-				sess.updateAddress(slave.Address)
+				sess.updateAddress(slave.Proto, slave.Address)
 			} else {
-				sess = newSession(slave.ID, slave.Address, svr.info)
+				sess = newSession(slave.ID, slave.Proto, slave.Address, svr.secretKey, svr.info)
 				svr.sessions[sess.ID] = sess
 			}
 		}
 	} else {
 		if sess, ok := svr.sessions[svr.serveInfo.ID]; ok {
-			sess.updateAddress(svr.serveInfo.Address)
+			sess.updateAddress(svr.serveInfo.Proto, svr.serveInfo.Address)
 		} else {
-			sess = newSession(svr.serveInfo.ID, svr.serveInfo.Address, svr.info)
+			sess = newSession(svr.serveInfo.ID, svr.serveInfo.Proto, svr.serveInfo.Address, svr.secretKey, svr.info)
 			svr.sessions[sess.ID] = sess
 		}
 	}
@@ -150,9 +162,11 @@ func (svr *Server) checkStatus() {
 			log.Warn("runtime panic %v: %s", r, string(debug.Stack()))
 		}
 	}()
+	ctx, cancelFunc := context.WithTimeout(svr.ctx, time.Second*5)
+	defer cancelFunc()
 	for _, sess := range svr.sessions {
 		if sess.IsEqual(StateReady) {
-			sess.Ping(svr.ctx)
+			sess.Ping(ctx)
 			duration := time.Now().Sub(sess.HeartbeatTime)
 			if duration > time.Second*150 {
 				log.Warnf("session %s heartbeat timeout %s", sess.ID, duration)
@@ -187,8 +201,6 @@ func (svr *Server) eventLoop() {
 }
 
 func (svr *Server) Start(ctx context.Context) (err error) {
-	os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
-	os.Setenv("QUIC_GO_LOG_LEVEL", "error")
 	svr.ctx, svr.cancelFunc = context.WithCancel(ctx)
 	if err = svr.prepare(svr.ctx); err != nil {
 		return

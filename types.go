@@ -10,6 +10,7 @@ type Config struct {
 type (
 	ServeInfo struct {
 		ID        string      `json:"id"`
+		Proto     string      `json:"proto"`
 		Address   string      `json:"address"`
 		SecretKey string      `json:"secretKey"`
 		Slaves    []SlaveInfo `json:"slaves"`
@@ -21,6 +22,7 @@ type (
 		OS       string    `json:"os"`
 		Name     string    `json:"name"`
 		State    string    `json:"state"`
+		Proto    string    `yaml:"proto"`
 		Address  string    `json:"address"`
 		Uptime   time.Time `json:"uptime"`
 		PingTime time.Time `json:"ping_time"`

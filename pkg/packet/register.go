@@ -11,6 +11,7 @@ type (
 	RegisterRequest struct {
 		ID      string    `json:"id"`
 		Name    string    `json:"name"`
+		OS      string    `json:"os"`
 		Country string    `json:"country"`
 		IP      string    `json:"ip"`
 		CPU     int       `json:"cpu"`

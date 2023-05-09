@@ -5,8 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
-	"github.com/quic-go/quic-go"
-	"github.com/uole/nrgo/pkg/packet"
+	"io"
 	"math"
 	"sync/atomic"
 	"time"
@@ -27,9 +26,11 @@ type Session struct {
 	Address         string
 	State           int32
 	Connecting      int32
+	Proto           string
 	HeartbeatTime   time.Time
 	Tires           int32
 	LastAttemptTime time.Time
+	secretKey       []byte
 	info            *NodeInfo
 	conn            *Connection
 	sequence        uint16
@@ -38,34 +39,26 @@ type Session struct {
 
 func (sess *Session) Ping(ctx context.Context) {
 	var (
-		err    error
-		stream quic.Stream
-		reply  *packet.Frame
+		err error
 	)
 	if atomic.LoadInt32(&sess.State) != StateReady {
 		return
 	}
-	if stream, err = sess.conn.conn.OpenStreamSync(ctx); err != nil {
-		return
-	}
-	defer func() {
-		err = stream.Close()
-	}()
-	if sess.sequence >= math.MaxUint16 {
-		sess.sequence = 0
-	}
-	sess.sequence++
-	if reply, err = packet.SendRecv(stream, packet.NewFrame(packet.TypeHandshakePing, sess.sequence, packet.PingRequest{Timestamp: time.Now().Unix()})); err == nil {
-		if reply.Type == packet.TypeHandshakePong {
-			sess.HeartbeatTime = time.Now()
+	if err = sess.conn.Ping(ctx); err == nil {
+		sess.HeartbeatTime = time.Now()
+	} else {
+		log.Debugf("session %s handshake ping message error: %s", sess.ID, err.Error())
+		if errors.Is(err, io.ErrClosedPipe) {
+			err = sess.Close()
 		}
 	}
 }
 
-func (sess *Session) updateAddress(address string) {
+func (sess *Session) updateAddress(proto string, address string) {
 	//对信息进行重置
 	if sess.Address != address {
 		sess.Address = address
+		sess.Proto = proto
 		atomic.StoreInt32(&sess.Tires, 0)
 		_ = sess.Close() //reconnect
 	}
@@ -86,12 +79,14 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	}
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding
-	sess.conn = NewConnection(sess.info)
-	if err = sess.conn.Dial(ctx, sess.Address); err == nil {
+	sess.conn = NewConnection(sess.secretKey, sess.info)
+	if err = sess.conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
+		log.Debugf("dial %s with %s successful", sess.Proto, sess.Address)
 	} else {
 		sess.LastAttemptTime = time.Now()
+		log.Debugf("dial %s with %s error: %s", sess.Proto, sess.Address, err.Error())
 	}
 	return
 }
@@ -107,11 +102,13 @@ func (sess *Session) Close() (err error) {
 	return sess.conn.Close()
 }
 
-func newSession(id string, addr string, info *NodeInfo) (sess *Session) {
+func newSession(id string, proto, addr string, secretKey []byte, info *NodeInfo) (sess *Session) {
 	sess = &Session{
 		ID:            id,
+		Proto:         proto,
 		Address:       addr,
 		info:          info,
+		secretKey:     secretKey,
 		HeartbeatTime: time.Now(),
 	}
 	return sess
