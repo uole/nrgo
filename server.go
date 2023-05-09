@@ -105,7 +105,7 @@ func (svr *Server) prepare(ctx context.Context) (err error) {
 	return
 }
 
-func (svr *Server) lookupServeInfo(ctx context.Context) (err error) {
+func (svr *Server) getServeInfo(ctx context.Context) (err error) {
 	var (
 		secretKey string
 	)
@@ -134,24 +134,26 @@ func (svr *Server) lookupServeInfo(ctx context.Context) (err error) {
 	if len(svr.serveInfo.Slaves) > 0 {
 		for _, slave := range svr.serveInfo.Slaves {
 			if sess, ok := svr.sessions[slave.ID]; ok {
-				sess.updateAddress(slave.Proto, slave.Address)
+				sess.updateSecretKey(svr.secretKey)
+				sess.updateAddress(slave.Proto, slave.Address.Tunnel)
 			} else {
-				sess = newSession(slave.ID, slave.Proto, slave.Address, svr.secretKey, svr.info)
+				sess = newSession(slave.ID, slave.Proto, slave.Address.Tunnel, svr.secretKey, svr.info)
 				svr.sessions[sess.ID] = sess
 			}
 		}
 	} else {
 		if sess, ok := svr.sessions[svr.serveInfo.ID]; ok {
-			sess.updateAddress(svr.serveInfo.Proto, svr.serveInfo.Address)
+			sess.updateSecretKey(svr.secretKey)
+			sess.updateAddress(svr.serveInfo.Proto, svr.serveInfo.Address.Tunnel)
 		} else {
-			sess = newSession(svr.serveInfo.ID, svr.serveInfo.Proto, svr.serveInfo.Address, svr.secretKey, svr.info)
+			sess = newSession(svr.serveInfo.ID, svr.serveInfo.Proto, svr.serveInfo.Address.Tunnel, svr.secretKey, svr.info)
 			svr.sessions[sess.ID] = sess
 		}
 	}
 	return
 }
 
-func (svr *Server) checkStatus() {
+func (svr *Server) checkSession() {
 	var (
 		err error
 	)
@@ -188,12 +190,20 @@ func (svr *Server) checkStatus() {
 }
 
 func (svr *Server) eventLoop() {
-	ticker := time.NewTicker(time.Second * 45)
-	defer ticker.Stop()
+	refreshTicker := time.NewTicker(time.Minute * 20)
+	eventTicker := time.NewTicker(time.Second * 45)
+	defer func() {
+		refreshTicker.Stop()
+		eventTicker.Stop()
+	}()
 	for {
 		select {
-		case <-ticker.C:
-			svr.checkStatus()
+		case <-eventTicker.C:
+			svr.checkSession()
+		case <-refreshTicker.C:
+			if err := svr.getServeInfo(svr.ctx); err != nil {
+				log.Warnf("refresh server info failed cause by %s", err.Error())
+			}
 		case <-svr.ctx.Done():
 			return
 		}
@@ -205,11 +215,11 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 	if err = svr.prepare(svr.ctx); err != nil {
 		return
 	}
-	if err = svr.lookupServeInfo(svr.ctx); err != nil {
+	if err = svr.getServeInfo(svr.ctx); err != nil {
 		return
 	}
 	svr.routes()
-	svr.waitGroup.Go(svr.checkStatus)
+	svr.waitGroup.Go(svr.checkSession)
 	svr.waitGroup.Go(svr.eventLoop)
 	return
 }

@@ -1,6 +1,7 @@
 package nrgo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -54,13 +55,21 @@ func (sess *Session) Ping(ctx context.Context) {
 	}
 }
 
-func (sess *Session) updateAddress(proto string, address string) {
-	//对信息进行重置
-	if sess.Address != address {
-		sess.Address = address
-		sess.Proto = proto
+func (sess *Session) updateSecretKey(key []byte) {
+	if bytes.Compare(key, sess.secretKey) != 0 {
+		sess.secretKey = make([]byte, len(key))
+		copy(sess.secretKey[:], key[:])
 		atomic.StoreInt32(&sess.Tires, 0)
-		_ = sess.Close() //reconnect
+		_ = sess.Close()
+	}
+}
+
+func (sess *Session) updateAddress(proto string, address string) {
+	if sess.Proto != proto || sess.Address != address {
+		sess.Proto = proto
+		sess.Address = address
+		atomic.StoreInt32(&sess.Tires, 0)
+		_ = sess.Close()
 	}
 }
 
@@ -98,8 +107,10 @@ func (sess *Session) Receive(ctx context.Context) {
 }
 
 func (sess *Session) Close() (err error) {
-	atomic.StoreInt32(&sess.State, StateUnavailable)
-	return sess.conn.Close()
+	if atomic.CompareAndSwapInt32(&sess.State, StateReady, StateUnavailable) {
+		err = sess.conn.Close()
+	}
+	return
 }
 
 func newSession(id string, proto, addr string, secretKey []byte, info *NodeInfo) (sess *Session) {
