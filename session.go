@@ -94,6 +94,7 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	if err = sess.conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
+		log.Debugf("session %s attach connection %s", sess.ID, sess.conn.ID())
 		log.Debugf("reconnect session %s with %s successful", sess.ID, sess.Proto)
 	} else {
 		sess.LastAttemptTime = time.Now()
@@ -103,9 +104,10 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 }
 
 func (sess *Session) Receive(ctx context.Context) {
-	if err := sess.conn.IoLoop(ctx); err != nil {
-		log.Warnf("session %s io error: %s", sess.ID, err.Error())
-		err = sess.Close()
+	conn := sess.conn
+	if err := conn.IoLoop(ctx); err != nil {
+		log.Warnf("session %s connection %s io error: %s", sess.ID, conn.id, err.Error())
+		err = conn.Close()
 	}
 }
 

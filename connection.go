@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"git.nspix.com/golang/kos/pkg/log"
 	"git.nspix.com/golang/kos/util/pool"
+	"github.com/rs/xid"
 	goroutinePool "github.com/sourcegraph/conc/pool"
 	"github.com/uole/nrgo/pkg/multiplex"
 	"github.com/uole/nrgo/pkg/multiplex/kcp"
@@ -30,6 +32,7 @@ const (
 )
 
 type Connection struct {
+	id            string
 	secretKey     []byte
 	conn          multiplex.Session
 	seq           uint16
@@ -40,6 +43,10 @@ type Connection struct {
 	sequence      uint16
 	closeFlag     int32
 	closeChan     chan struct{}
+}
+
+func (conn *Connection) ID() string {
+	return conn.id
 }
 
 func (conn *Connection) handshake(stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
@@ -194,9 +201,12 @@ func (conn *Connection) Close() (err error) {
 	if !atomic.CompareAndSwapInt32(&conn.closeFlag, 0, 1) {
 		return
 	}
+	log.Debugf("connection %s closing", conn.id)
 	close(conn.closeChan)
 	conn.goroutinePool.Wait()
-	return conn.conn.Close()
+	err = conn.conn.Close()
+	log.Debugf("connection %s closed", conn.id)
+	return
 }
 
 func (conn *Connection) IoLoop(ctx context.Context) error {
@@ -211,6 +221,7 @@ func (conn *Connection) IoLoop(ctx context.Context) error {
 
 func NewConnection(secretKey []byte, info *NodeInfo) *Connection {
 	return &Connection{
+		id:            xid.New().String(),
 		info:          info,
 		secretKey:     secretKey,
 		goroutinePool: goroutinePool.New().WithMaxGoroutines(2048),
