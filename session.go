@@ -124,6 +124,7 @@ func newSession(id string, proto, addr string, secretKey []byte, info *NodeInfo)
 		Proto:         proto,
 		Address:       addr,
 		info:          info,
+		State:         StateUnavailable,
 		secretKey:     secretKey,
 		HeartbeatTime: time.Now(),
 	}
