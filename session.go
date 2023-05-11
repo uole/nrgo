@@ -95,10 +95,10 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
 		log.Debugf("session %s attach connection %s", sess.ID, sess.conn.ID())
-		log.Debugf("reconnect session %s with %s successful", sess.ID, sess.Proto)
+		log.Debugf("session %s connected with %s", sess.ID, sess.Proto)
 	} else {
 		sess.LastAttemptTime = time.Now()
-		log.Debugf("reconnect session %s with %s error: %s", sess.ID, sess.Proto, err.Error())
+		log.Debugf("session %s connect with %s error: %s", sess.ID, sess.Proto, err.Error())
 	}
 	return
 }

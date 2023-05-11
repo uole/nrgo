@@ -185,7 +185,7 @@ func (svr *Server) checkSession() {
 		}
 		// if session is closed, try reconnecting to server
 		if sess.IsEqual(StateUnavailable) {
-			log.Warnf("try reconnection session %s", sess.ID)
+			log.Debugf("try connecting session %s(%s)", sess.ID, sess.Address)
 			if err = sess.Connect(svr.ctx); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
