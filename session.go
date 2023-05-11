@@ -48,7 +48,7 @@ func (sess *Session) Ping(ctx context.Context) {
 	if err = sess.conn.Ping(ctx); err == nil {
 		sess.HeartbeatTime = time.Now()
 	} else {
-		log.Debugf("session %s handshake ping message error: %s", sess.ID, err.Error())
+		log.Debugf("session %s ping error: %s", sess.ID, err.Error())
 		if errors.Is(err, io.ErrClosedPipe) {
 			err = sess.Close()
 		}
@@ -94,6 +94,7 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	if err = sess.conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
+		sess.HeartbeatTime = time.Now()
 		log.Debugf("session %s attach connection %s", sess.ID, sess.conn.ID())
 		log.Debugf("session %s connected with %s", sess.ID, sess.Proto)
 	} else {
@@ -106,7 +107,6 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 func (sess *Session) Receive(ctx context.Context) {
 	conn := sess.conn
 	if err := conn.IoLoop(ctx); err != nil {
-		log.Warnf("session %s connection %s io error: %s", sess.ID, conn.id, err.Error())
 		err = conn.Close()
 	}
 }
