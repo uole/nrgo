@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type Server struct {
 	waitGroup  conc.WaitGroup
 	mutex      sync.RWMutex
 	secretKey  []byte
+	checking   int32
 	sessions   map[string]*Session
 }
 
@@ -157,9 +159,13 @@ func (svr *Server) checkSession() {
 	var (
 		err error
 	)
+	if !atomic.CompareAndSwapInt32(&svr.checking, 0, 1) {
+		return
+	}
 	svr.mutex.RLock()
 	defer func() {
 		svr.mutex.RUnlock()
+		atomic.StoreInt32(&svr.checking, 0)
 		if r := recover(); r != nil {
 			log.Warn("runtime panic %v: %s", r, string(debug.Stack()))
 		}
@@ -178,7 +184,8 @@ func (svr *Server) checkSession() {
 			}
 		}
 		// if session is closed, try reconnecting to server
-		if !sess.IsEqual(StateReady) {
+		if sess.IsEqual(StateUnavailable) {
+			log.Warnf("try reconnection session %s", sess.ID)
 			if err = sess.Connect(svr.ctx); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
