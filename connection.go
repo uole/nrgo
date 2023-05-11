@@ -19,6 +19,7 @@ import (
 	"math"
 	"net"
 	"runtime"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 )
@@ -135,12 +136,21 @@ func (conn *Connection) Ping(ctx context.Context) (err error) {
 	}
 	defer func() {
 		err = stream.Close()
+		if r := recover(); r != nil {
+			log.Warnf("ping panic: %v: %s", r, string(debug.Stack()))
+		}
 	}()
 	if conn.sequence >= math.MaxUint16 {
 		conn.sequence = 0
 	}
 	conn.sequence++
-	if reply, err = packet.SendRecv(ctx, stream, packet.NewFrame(packet.TypeHandshakePing, conn.sequence, packet.PingRequest{Timestamp: time.Now().Unix()})); err == nil {
+	if reply, err = packet.SendRecv(ctx, stream, packet.NewFrame(
+		packet.TypeHandshakePing,
+		conn.sequence,
+		packet.PingRequest{
+			Timestamp: time.Now().Unix(),
+		}),
+	); err == nil {
 		if reply.Type == packet.TypeHandshakePong {
 			return nil
 		}

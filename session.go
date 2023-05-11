@@ -83,6 +83,9 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
 		return ErrConnecting
 	}
+	var (
+		conn *Connection
+	)
 	defer atomic.StoreInt32(&sess.Connecting, 0)
 	duration := time.Now().Sub(sess.LastAttemptTime)
 	if duration.Seconds() < math.Pow(float64(sess.Tires), 1.5) {
@@ -90,12 +93,22 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	}
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding
-	sess.conn = NewConnection(sess.secretKey, sess.info)
-	if err = sess.conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
+	if sess.conn != nil {
+		_ = sess.conn.Close()
+	}
+	conn = NewConnection(sess.secretKey, sess.info)
+	if err = conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
 		sess.State = StateReady
 		atomic.StoreInt32(&sess.Tires, 0)
+		if sess.conn != nil {
+			if sess.conn.ID() != conn.ID() {
+				log.Debugf("session %s replace connection %s -> %s", sess.ID, sess.conn.ID(), conn.ID())
+			} else {
+				log.Debugf("session %s attach connection %s", sess.ID, conn.ID())
+			}
+		}
+		sess.conn = conn
 		sess.HeartbeatTime = time.Now()
-		log.Debugf("session %s attach connection %s", sess.ID, sess.conn.ID())
 		log.Debugf("session %s connected with %s", sess.ID, sess.Proto)
 	} else {
 		sess.LastAttemptTime = time.Now()
