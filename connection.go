@@ -28,6 +28,10 @@ var (
 
 const (
 	defaultBufferSize = 16 * 1024
+
+	protoQUIC = "quic"
+	protoKCP  = "kcp"
+	protoTCP  = "tcp"
 )
 
 type Connection struct {
@@ -100,9 +104,6 @@ func (conn *Connection) handlePing(request *packet.Frame, stream multiplex.Strea
 	var (
 		err error
 	)
-	defer func() {
-		err = stream.Close()
-	}()
 	if err = packet.WriteFrame(
 		stream,
 		packet.NewFrame(
@@ -112,8 +113,6 @@ func (conn *Connection) handlePing(request *packet.Frame, stream multiplex.Strea
 		),
 	); err != nil {
 		log.Debugf("connection %s write pong error: %s", conn.ID(), err.Error())
-	} else {
-		log.Debugf("connection %s receive ping", conn.ID())
 	}
 }
 
@@ -123,10 +122,11 @@ func (conn *Connection) handleTraffic(request *packet.Frame, stream multiplex.St
 		remote io.ReadWriteCloser
 	)
 	if remote, err = conn.handshake(request, stream); err != nil {
+		log.Debugf("connection %s handshake error: %s", conn.ID(), err.Error())
 		return
 	}
 	defer func() {
-		err = remote.Close()
+		err = stream.Close()
 	}()
 	errChan := make(chan error, 2)
 	go conn.pipe(remote, stream, errChan)
@@ -138,7 +138,7 @@ func (conn *Connection) handleTraffic(request *packet.Frame, stream multiplex.St
 	}
 }
 
-func (conn *Connection) process(local multiplex.Stream) {
+func (conn *Connection) process(stream multiplex.Stream) {
 	var (
 		err   error
 		frame *packet.Frame
@@ -146,17 +146,19 @@ func (conn *Connection) process(local multiplex.Stream) {
 	atomic.StoreInt64(&conn.activeStamp, time.Now().Unix())
 	atomic.AddInt32(&conn.concurrency, 1)
 	defer func() {
-		err = local.Close()
+		err = stream.Close()
 		atomic.AddInt32(&conn.concurrency, -1)
 	}()
-	if frame, err = packet.ReadFrame(local); err != nil {
+	if frame, err = packet.ReadFrame(stream); err != nil {
 		return
 	}
 	switch frame.Type {
 	case packet.TypeHandshakePing:
-		conn.handlePing(frame, local)
+		conn.handlePing(frame, stream)
 	case packet.TypeHandshakeRequest:
-		conn.handleTraffic(frame, local)
+		conn.handleTraffic(frame, stream)
+	default:
+		log.Debugf("connection %s receive unsupported request: %0x", conn.ID(), frame.Type)
 	}
 	return
 }
@@ -167,9 +169,9 @@ func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error
 		frame *packet.Frame
 	)
 	switch proto {
-	case "quic":
+	case protoQUIC:
 		conn.conn, err = quic.Dial(ctx, addr)
-	case "kcp":
+	case protoKCP:
 		conn.conn, err = kcp.Dial(ctx, addr, func(opts *kcp.Options) {
 			opts.Key = conn.secretKey
 		})

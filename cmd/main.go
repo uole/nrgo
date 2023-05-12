@@ -9,8 +9,33 @@ import (
 	"os"
 )
 
+var (
+	serviceFlag = flag.Bool("service", false, "Print service template")
+)
+
+func printService() {
+	fmt.Println(`
+[Unit]
+Description= Network provider client
+
+[Service]
+StartLimitInterval=5
+StartLimitBurst=10
+ExecStart=/usr/local/bin/nrgo
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+`)
+}
+
 func main() {
 	flag.Parse()
+	if *serviceFlag {
+		printService()
+		os.Exit(0)
+	}
 	svr := kos.Init(
 		kos.WithName("github.com/uole/nrgo", version.Version),
 		kos.WithServer(nrgo.New()),
