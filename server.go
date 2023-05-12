@@ -170,27 +170,14 @@ func (svr *Server) checkSession() {
 			log.Warn("runtime panic %v: %s", r, string(debug.Stack()))
 		}
 	}()
-	ctx, cancelFunc := context.WithTimeout(svr.ctx, time.Second*5)
-	defer cancelFunc()
 	for _, sess := range svr.sessions {
-		if sess.IsEqual(StateReady) {
-			sess.Ping(ctx)
-			duration := time.Now().Sub(sess.HeartbeatTime)
-			if duration > time.Second*150 {
-				log.Warnf("session %s heartbeat timeout %s", sess.ID, duration)
-				if err = sess.Close(); err != nil {
-					log.Warnf("session %s close timeout connection error: %s", sess.ID, err.Error())
-				}
-			}
-		}
 		// if session is closed, try reconnecting to server
-		if sess.IsEqual(StateUnavailable) {
+		if !sess.IsEqual(StateReady) {
 			log.Debugf("try connecting session %s(%s)", sess.ID, sess.Address)
 			if err = sess.Connect(svr.ctx); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
 				log.Infof("session %s connect successful", sess.ID)
-				go sess.Receive(svr.ctx)
 			}
 		}
 	}
@@ -198,7 +185,7 @@ func (svr *Server) checkSession() {
 
 func (svr *Server) eventLoop() {
 	refreshTicker := time.NewTicker(time.Minute * 20)
-	eventTicker := time.NewTicker(time.Second * 45)
+	eventTicker := time.NewTicker(time.Second * 20)
 	defer func() {
 		refreshTicker.Stop()
 		eventTicker.Stop()

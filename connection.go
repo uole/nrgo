@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
 	"git.nspix.com/golang/kos/util/pool"
 	"github.com/rs/xid"
-	goroutinePool "github.com/sourcegraph/conc/pool"
 	"github.com/uole/nrgo/pkg/multiplex"
 	"github.com/uole/nrgo/pkg/multiplex/kcp"
 	"github.com/uole/nrgo/pkg/multiplex/quic"
@@ -19,7 +17,7 @@ import (
 	"math"
 	"net"
 	"runtime"
-	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -33,53 +31,21 @@ const (
 )
 
 type Connection struct {
-	id            string
-	secretKey     []byte
-	conn          multiplex.Session
-	seq           uint16
-	info          *NodeInfo
-	dialer        net.Dialer
-	goroutinePool *goroutinePool.Pool
-	concurrency   int32
-	sequence      uint16
-	closeFlag     int32
-	closeChan     chan struct{}
+	id          string
+	secretKey   []byte
+	conn        multiplex.Session
+	info        *NodeInfo
+	dialer      net.Dialer
+	concurrency int32
+	sequence    uint16
+	activeStamp int64
+	closeFlag   int32
+	mutex       sync.Mutex
+	closeChan   chan struct{}
 }
 
 func (conn *Connection) ID() string {
 	return conn.id
-}
-
-func (conn *Connection) handshake(stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
-	var (
-		frame   *packet.Frame
-		timeout time.Duration
-	)
-	if frame, err = packet.ReadFrame(stream); err != nil {
-		return
-	}
-	if frame.Type != packet.TypeHandshakeRequest {
-		return nil, fmt.Errorf("unsupported frame type %v", frame.Type)
-	}
-	req := &packet.HandshakeRequest{}
-	if err = json.Unmarshal(frame.Buf, req); err != nil {
-		return
-	}
-	timeout = req.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	res := &packet.HandshakeResponse{
-		Host: req.Host,
-	}
-	if rwc, err = net.DialTimeout("tcp", req.Host, timeout); err == nil {
-		res.Success = true
-		err = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, frame.Sequence, res))
-	} else {
-		res.Reason = err.Error()
-		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, frame.Sequence, res))
-	}
-	return
 }
 
 func (conn *Connection) pipe(dst, src io.ReadWriteCloser, ch chan<- error) {
@@ -95,65 +61,102 @@ func (conn *Connection) pipe(dst, src io.ReadWriteCloser, ch chan<- error) {
 	return
 }
 
-func (conn *Connection) process(local multiplex.Stream) {
+func (conn *Connection) nextSequence() uint16 {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.sequence++
+	if conn.sequence >= math.MaxUint16 {
+		conn.sequence = 0
+	}
+	return conn.sequence
+}
+
+func (conn *Connection) handshake(request *packet.Frame, stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
+	var (
+		timeout time.Duration
+	)
+	req := &packet.HandshakeRequest{}
+	if err = json.Unmarshal(request.Buf, req); err != nil {
+		return
+	}
+	timeout = req.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	res := &packet.HandshakeResponse{
+		Host: req.Host,
+	}
+	if rwc, err = net.DialTimeout("tcp", req.Host, timeout); err == nil {
+		res.Success = true
+		err = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
+	} else {
+		res.Reason = err.Error()
+		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
+	}
+	return
+}
+
+func (conn *Connection) handlePing(request *packet.Frame, stream multiplex.Stream) {
+	var (
+		err error
+	)
+	defer func() {
+		err = stream.Close()
+	}()
+	if err = packet.WriteFrame(
+		stream,
+		packet.NewFrame(
+			packet.TypeHandshakePong,
+			request.Sequence,
+			&packet.PongResponse{Timestamp: time.Now().Unix()},
+		),
+	); err != nil {
+		log.Debugf("connection %s write pong error: %s", conn.ID(), err.Error())
+	} else {
+		log.Debugf("connection %s receive ping", conn.ID())
+	}
+}
+
+func (conn *Connection) handleTraffic(request *packet.Frame, stream multiplex.Stream) {
 	var (
 		err    error
 		remote io.ReadWriteCloser
 	)
-	atomic.AddInt32(&conn.concurrency, 1)
-	defer func() {
-		err = local.Close()
-		atomic.AddInt32(&conn.concurrency, -1)
-	}()
-	if remote, err = conn.handshake(local); err != nil {
+	if remote, err = conn.handshake(request, stream); err != nil {
 		return
 	}
 	defer func() {
 		err = remote.Close()
 	}()
 	errChan := make(chan error, 2)
-	conn.goroutinePool.Go(func() {
-		conn.pipe(remote, local, errChan)
-	})
-	conn.goroutinePool.Go(func() {
-		conn.pipe(local, remote, errChan)
-	})
+	go conn.pipe(remote, stream, errChan)
+	go conn.pipe(stream, remote, errChan)
 	select {
 	case <-conn.closeChan:
 		err = io.ErrClosedPipe
 	case err = <-errChan:
 	}
-	return
 }
 
-func (conn *Connection) Ping(ctx context.Context) (err error) {
+func (conn *Connection) process(local multiplex.Stream) {
 	var (
-		stream multiplex.Stream
-		reply  *packet.Frame
+		err   error
+		frame *packet.Frame
 	)
-	if stream, err = conn.conn.OpenStream(ctx); err != nil {
+	atomic.StoreInt64(&conn.activeStamp, time.Now().Unix())
+	atomic.AddInt32(&conn.concurrency, 1)
+	defer func() {
+		err = local.Close()
+		atomic.AddInt32(&conn.concurrency, -1)
+	}()
+	if frame, err = packet.ReadFrame(local); err != nil {
 		return
 	}
-	defer func() {
-		err = stream.Close()
-		if r := recover(); r != nil {
-			log.Warnf("ping panic: %v: %s", r, string(debug.Stack()))
-		}
-	}()
-	if conn.sequence >= math.MaxUint16 {
-		conn.sequence = 0
-	}
-	conn.sequence++
-	if reply, err = packet.SendRecv(ctx, stream, packet.NewFrame(
-		packet.TypeHandshakePing,
-		conn.sequence,
-		packet.PingRequest{
-			Timestamp: time.Now().Unix(),
-		}),
-	); err == nil {
-		if reply.Type == packet.TypeHandshakePong {
-			return nil
-		}
+	switch frame.Type {
+	case packet.TypeHandshakePing:
+		conn.handlePing(frame, local)
+	case packet.TypeHandshakeRequest:
+		conn.handleTraffic(frame, local)
 	}
 	return
 }
@@ -178,7 +181,6 @@ func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error
 	if err != nil {
 		return
 	}
-	conn.seq++
 	req := &packet.RegisterRequest{
 		ID:      conn.info.ID,
 		OS:      runtime.GOOS,
@@ -188,7 +190,7 @@ func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error
 		CPU:     conn.info.CPU,
 		Uptime:  conn.info.Uptime,
 	}
-	if err = conn.conn.WriteMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.seq, req).Bytes()); err != nil {
+	if err = conn.conn.WriteMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.nextSequence(), req).Bytes()); err != nil {
 		return
 	}
 	if buf, err = conn.conn.ReadMessage(); err != nil {
@@ -211,11 +213,8 @@ func (conn *Connection) Close() (err error) {
 	if !atomic.CompareAndSwapInt32(&conn.closeFlag, 0, 1) {
 		return
 	}
-	log.Debugf("connection %s closing", conn.id)
 	close(conn.closeChan)
-	conn.goroutinePool.Wait()
 	err = conn.conn.Close()
-	log.Debugf("connection %s closed", conn.id)
 	return
 }
 
@@ -231,10 +230,9 @@ func (conn *Connection) IoLoop(ctx context.Context) error {
 
 func NewConnection(secretKey []byte, info *NodeInfo) *Connection {
 	return &Connection{
-		id:            xid.New().String(),
-		info:          info,
-		secretKey:     secretKey,
-		goroutinePool: goroutinePool.New().WithMaxGoroutines(2048),
-		closeChan:     make(chan struct{}),
+		id:        xid.New().String(),
+		info:      info,
+		secretKey: secretKey,
+		closeChan: make(chan struct{}),
 	}
 }

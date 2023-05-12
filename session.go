@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
-	"io"
-	"math"
 	"sync/atomic"
 	"time"
 )
@@ -28,7 +25,6 @@ type Session struct {
 	State           int32
 	Connecting      int32
 	Proto           string
-	HeartbeatTime   time.Time
 	Tires           int32
 	LastAttemptTime time.Time
 	secretKey       []byte
@@ -36,23 +32,6 @@ type Session struct {
 	conn            *Connection
 	sequence        uint16
 	restartFlag     int32
-}
-
-func (sess *Session) Ping(ctx context.Context) {
-	var (
-		err error
-	)
-	if atomic.LoadInt32(&sess.State) != StateReady {
-		return
-	}
-	if err = sess.conn.Ping(ctx); err == nil {
-		sess.HeartbeatTime = time.Now()
-	} else {
-		log.Debugf("session %s ping error: %s", sess.ID, err.Error())
-		if errors.Is(err, io.ErrClosedPipe) {
-			err = sess.Close()
-		}
-	}
 }
 
 func (sess *Session) updateSecretKey(key []byte) {
@@ -80,54 +59,55 @@ func (sess *Session) IsEqual(state int32) bool {
 }
 
 func (sess *Session) Connect(ctx context.Context) (err error) {
-	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
-		return ErrConnecting
-	}
 	var (
 		conn *Connection
 	)
-	defer atomic.StoreInt32(&sess.Connecting, 0)
-	duration := time.Now().Sub(sess.LastAttemptTime)
-	if duration.Seconds() < math.Pow(float64(sess.Tires), 1.5) {
-		return fmt.Errorf("%s are left until the next connection", duration)
+	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
+		return ErrConnecting
 	}
+	defer func() {
+		atomic.StoreInt32(&sess.Connecting, 0)
+	}()
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding
-	if sess.conn != nil {
-		_ = sess.conn.Close()
-	}
 	conn = NewConnection(sess.secretKey, sess.info)
-	if err = conn.Dial(ctx, sess.Proto, sess.Address); err == nil {
-		sess.State = StateReady
-		atomic.StoreInt32(&sess.Tires, 0)
-		if sess.conn != nil {
-			if sess.conn.ID() != conn.ID() {
-				log.Debugf("session %s replace connection %s -> %s", sess.ID, sess.conn.ID(), conn.ID())
-			} else {
-				log.Debugf("session %s attach connection %s", sess.ID, conn.ID())
-			}
-		}
-		sess.conn = conn
-		sess.HeartbeatTime = time.Now()
-		log.Debugf("session %s connected with %s", sess.ID, sess.Proto)
-	} else {
+	if err = conn.Dial(ctx, sess.Proto, sess.Address); err != nil {
+		sess.State = StateUnavailable
 		sess.LastAttemptTime = time.Now()
 		log.Debugf("session %s connect with %s error: %s", sess.ID, sess.Proto, err.Error())
+		return
 	}
+	atomic.StoreInt32(&sess.Tires, 0)
+	if sess.conn != nil {
+		oldConn := sess.conn
+		if oldConn.ID() != conn.ID() {
+			log.Debugf("session %s replace connection %s -> %s", sess.ID, oldConn.ID(), conn.ID())
+		} else {
+			log.Debugf("session %s attach connection %s", sess.ID, conn.ID())
+		}
+		if err = oldConn.Close(); err != nil {
+			log.Warnf("session %s closed old connection %s error: %s", sess.ID, oldConn.ID(), err.Error())
+		}
+	}
+	sess.conn = conn
+	sess.State = StateReady
+	log.Debugf("session %s connected with %s protocol", sess.ID, sess.Proto)
+	go sess.Receive(ctx, conn)
 	return
 }
 
-func (sess *Session) Receive(ctx context.Context) {
-	conn := sess.conn
+func (sess *Session) Receive(ctx context.Context, conn *Connection) {
 	if err := conn.IoLoop(ctx); err != nil {
-		err = conn.Close()
+		log.Warnf("session %s io error: %s", sess.ID, err.Error())
+		err = sess.Close()
 	}
 }
 
 func (sess *Session) Close() (err error) {
 	if atomic.CompareAndSwapInt32(&sess.State, StateReady, StateUnavailable) {
-		log.Debugf("session %s closing", sess.ID)
-		err = sess.conn.Close()
+		if err = sess.conn.Close(); err != nil {
+			log.Warnf("session %s connection %s close error: %s", sess.ID, err.Error())
+		}
 		log.Debugf("session %s closed", sess.ID)
 	}
 	return
@@ -135,13 +115,12 @@ func (sess *Session) Close() (err error) {
 
 func newSession(id string, proto, addr string, secretKey []byte, info *NodeInfo) (sess *Session) {
 	sess = &Session{
-		ID:            id,
-		Proto:         proto,
-		Address:       addr,
-		info:          info,
-		State:         StateUnavailable,
-		secretKey:     secretKey,
-		HeartbeatTime: time.Now(),
+		ID:        id,
+		Proto:     proto,
+		Address:   addr,
+		info:      info,
+		State:     StateUnavailable,
+		secretKey: secretKey,
 	}
 	return sess
 }
