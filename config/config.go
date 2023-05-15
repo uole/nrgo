@@ -21,8 +21,8 @@ type (
 )
 
 type Config struct {
-	Direct    bool      `yaml:"direct" yaml:"direct"`
-	Wireguard Wireguard `json:"warp" yaml:"warp"`
+	Direct    bool      `json:"direct" yaml:"direct"`
+	Wireguard Wireguard `json:"wireguard" yaml:"wireguard"`
 }
 
 func New() *Config {

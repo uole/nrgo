@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"git.nspix.com/golang/kos/pkg/log"
 	"github.com/uole/nrgo/config"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -117,6 +118,17 @@ func (d *Wireguard) buildPeer(i config.Peer) (str string, err error) {
 	return
 }
 
+func (d *Wireguard) createLogger() *device.Logger {
+	return &device.Logger{
+		Verbosef: func(format string, args ...any) {
+			log.Debugf(format, args)
+		},
+		Errorf: func(format string, args ...any) {
+			log.Warnf(format, args)
+		},
+	}
+}
+
 func (d *Wireguard) Dial(network, address string) (net.Conn, error) {
 	if !d.Ready() {
 		return nil, io.ErrNoProgress
@@ -147,10 +159,11 @@ func (d *Wireguard) Mount(ctx context.Context) (err error) {
 	if tunDevice, d.netstack, err = netstack.CreateNetTUN(address, dns, int(mtu)); err != nil {
 		return
 	}
-	d.device = device.NewDevice(tunDevice, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, ""))
+	d.device = device.NewDevice(tunDevice, conn.NewDefaultBind(), d.createLogger())
 	if uapi, err = d.buildPeer(d.Config.Peer); err != nil {
 		return
 	}
+	log.Debugf("connecting peer \n %s", uapi)
 	if err = d.device.IpcSet(uapi); err != nil {
 		return
 	}
