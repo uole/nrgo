@@ -18,7 +18,7 @@ func (svr *Server) handleListSessions(ctx *http.Context) (err error) {
 }
 
 func (svr *Server) handleRenewIP(ctx *http.Context) (err error) {
-	if err = svr.warp.Reload(); err == nil {
+	if err = svr.wireguard.Reload(); err == nil {
 		return ctx.Error(ErrHttpRenew, err.Error())
 	}
 	return ctx.Success("OK")
