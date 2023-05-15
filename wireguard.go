@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/uole/nrgo/config"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -19,30 +20,12 @@ import (
 )
 
 type (
-	wireguardInterface struct {
-		PrivateKey string `json:"private_key" yaml:"privateKey"`
-		Address    string `json:"address" yaml:"address"`
-		DNS        string `json:"dns" yaml:"dns"`
-		MTU        uint   `json:"mtu" yaml:"mtu"`
-	}
-
-	wireguardPeer struct {
-		PublicKey  string `json:"public_key" yaml:"publicKey"`
-		AllowedIPs string `json:"allowed_ips" yaml:"allowedIPs"`
-		Endpoint   string `json:"endpoint" yaml:"endpoint"`
-	}
-
-	WireguardConfig struct {
-		Interface wireguardInterface `json:"interface" yaml:"interface"`
-		Peer      wireguardPeer      `json:"peer" yaml:"peer"`
-	}
-
 	Wireguard struct {
 		device    *device.Device
 		netstack  *netstack.Net
 		readyFlag int32
 		mutex     sync.Mutex
-		Config    WireguardConfig `json:"config" yaml:"config"`
+		Config    config.Wireguard `json:"config" yaml:"config"`
 	}
 )
 
@@ -101,7 +84,7 @@ func (d *Wireguard) parseBase64KeyToHex(value string) (str string, err error) {
 	return
 }
 
-func (d *Wireguard) parseInterface(i wireguardInterface) (address, dns []netip.Addr, mtu uint, err error) {
+func (d *Wireguard) parseInterface(i config.Interface) (address, dns []netip.Addr, mtu uint, err error) {
 	if address, err = d.parseCIDRNetIP(i.Address); err != nil {
 		return
 	}
@@ -116,7 +99,7 @@ func (d *Wireguard) parseInterface(i wireguardInterface) (address, dns []netip.A
 	return
 }
 
-func (d *Wireguard) buildPeer(i wireguardPeer) (str string, err error) {
+func (d *Wireguard) buildPeer(i config.Peer) (str string, err error) {
 	var (
 		sb        strings.Builder
 		publicKey string
@@ -198,6 +181,6 @@ func (d *Wireguard) Reload() (err error) {
 	return
 }
 
-func newWireguard(cfg WireguardConfig) *Wireguard {
+func newWireguard(cfg config.Wireguard) *Wireguard {
 	return &Wireguard{Config: cfg}
 }
