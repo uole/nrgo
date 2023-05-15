@@ -100,20 +100,25 @@ func (d *Wireguard) parseInterface(i config.Interface) (address, dns []netip.Add
 	return
 }
 
-func (d *Wireguard) buildPeer(i config.Peer) (str string, err error) {
+func (d *Wireguard) buildPeer(p config.Peer, i config.Interface) (str string, err error) {
 	var (
-		sb        strings.Builder
-		publicKey string
+		sb         strings.Builder
+		publicKey  string
+		privateKey string
 	)
-	if publicKey, err = d.parseBase64KeyToHex(i.PublicKey); err != nil {
+	if privateKey, err = d.parseBase64KeyToHex(i.PrivateKey); err != nil {
 		return
 	}
+	if publicKey, err = d.parseBase64KeyToHex(p.PublicKey); err != nil {
+		return
+	}
+	sb.WriteString("private_key=" + privateKey + "\n")
 	sb.WriteString("public_key=" + publicKey + "\n")
-	sb.WriteString("endpoint=" + i.Endpoint + "\n")
+	sb.WriteString("endpoint=" + p.Endpoint + "\n")
 	sb.WriteString("persistent_keepalive_interval=0\n")
 	sb.WriteString("preshared_key=0000000000000000000000000000000000000000000000000000000000000000\n")
 	sb.WriteString("allowed_ip=0.0.0.0/0\n")
-	sb.WriteString("allowed_ip=::0/0\n")
+	sb.WriteString("allowed_ip=::0/0")
 	str = sb.String()
 	return
 }
@@ -121,10 +126,10 @@ func (d *Wireguard) buildPeer(i config.Peer) (str string, err error) {
 func (d *Wireguard) createLogger() *device.Logger {
 	return &device.Logger{
 		Verbosef: func(format string, args ...any) {
-			log.Debugf(format, args)
+			log.Debugf(format, args...)
 		},
 		Errorf: func(format string, args ...any) {
-			log.Warnf(format, args)
+			log.Warnf(format, args...)
 		},
 	}
 }
@@ -160,10 +165,10 @@ func (d *Wireguard) Mount(ctx context.Context) (err error) {
 		return
 	}
 	d.device = device.NewDevice(tunDevice, conn.NewDefaultBind(), d.createLogger())
-	if uapi, err = d.buildPeer(d.Config.Peer); err != nil {
+	if uapi, err = d.buildPeer(d.Config.Peer, d.Config.Interface); err != nil {
 		return
 	}
-	log.Debugf("connecting peer \n %s", uapi)
+	log.Debugf("connecting peer \n%s", uapi)
 	if err = d.device.IpcSet(uapi); err != nil {
 		return
 	}
