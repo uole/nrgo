@@ -1,13 +1,20 @@
 package nrgo
 
-import "time"
-
-type Config struct {
-	Version string `json:"version"`
-	Domain  string `json:"domain"`
-}
+import (
+	"github.com/uole/nrgo/pkg/multiplex"
+	"github.com/uole/nrgo/pkg/packet"
+	"io"
+	"time"
+)
 
 type (
+	Handshake func(*packet.Frame, multiplex.Stream) (io.ReadWriteCloser, error)
+
+	Software struct {
+		Version string `json:"version"`
+		Domain  string `json:"domain"`
+	}
+
 	Address struct {
 		Proxy  string `json:"proxy"`
 		Tunnel string `json:"tunnel"`

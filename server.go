@@ -3,6 +3,7 @@ package nrgo
 import (
 	"context"
 	"crypto/sha1"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
@@ -12,10 +13,15 @@ import (
 	retry "github.com/avast/retry-go"
 	"github.com/rs/xid"
 	"github.com/sourcegraph/conc"
+	"github.com/uole/nrgo/config"
 	"github.com/uole/nrgo/internal/utils"
+	"github.com/uole/nrgo/pkg/multiplex"
+	"github.com/uole/nrgo/pkg/packet"
 	"github.com/uole/nrgo/pkg/stream"
 	"github.com/uole/nrgo/version"
 	"golang.org/x/crypto/pbkdf2"
+	"io"
+	"net"
 	"os"
 	"path"
 	"runtime"
@@ -29,14 +35,49 @@ type Server struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	Uptime     time.Time
-	cfg        *Config
+	software   *Software
 	info       *NodeInfo
 	serveInfo  *ServeInfo
 	waitGroup  conc.WaitGroup
 	mutex      sync.RWMutex
 	secretKey  []byte
 	checking   int32
+	wireguard  *Wireguard
+	cfg        *config.Config
 	sessions   map[string]*Session
+}
+
+func (svr *Server) handshake(request *packet.Frame, stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
+	var (
+		dialer  net.Dialer
+		timeout time.Duration
+	)
+	req := &packet.HandshakeRequest{}
+	if err = json.Unmarshal(request.Buf, req); err != nil {
+		return
+	}
+	timeout = req.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	res := &packet.HandshakeResponse{
+		Host: req.Host,
+	}
+	ctx, cancelFunc := context.WithTimeout(svr.ctx, timeout)
+	defer cancelFunc()
+	if !svr.cfg.Direct && svr.wireguard.Ready() {
+		rwc, err = svr.wireguard.DialContext(ctx, "tcp", req.Host)
+	} else {
+		rwc, err = dialer.DialContext(ctx, "tcp", req.Host)
+	}
+	if err == nil {
+		res.Success = true
+		err = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
+	} else {
+		res.Reason = err.Error()
+		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
+	}
+	return
 }
 
 func (svr *Server) readSessionSnapshot() []*Session {
@@ -50,7 +91,7 @@ func (svr *Server) readSessionSnapshot() []*Session {
 }
 
 func (svr *Server) domainName() string {
-	return env.Get("NRGO_DOMAIN", svr.cfg.Domain)
+	return env.Get("NRGO_DOMAIN", svr.software.Domain)
 }
 
 func (svr *Server) extGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
@@ -70,12 +111,12 @@ func (svr *Server) extGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
 }
 
 func (svr *Server) initConfig(ctx context.Context) (err error) {
-	cfg := &Config{}
+	software := &Software{}
 	return retry.Do(func() error {
-		if err = fetch.Request(ctx, env.Get("NRGO_CONFIG_URL", "https://s3.tebi.io/nobla/vrgo.json"), cfg); err != nil {
+		if err = fetch.Request(ctx, env.Get("NRGO_CONFIG_URL", "https://s3.tebi.io/nobla/vrgo.json"), software); err != nil {
 			return err
 		}
-		svr.cfg = cfg
+		svr.software = software
 		return nil
 	},
 		retry.Attempts(5),
@@ -174,7 +215,7 @@ func (svr *Server) checkSession() {
 		// if session is closed, try reconnecting to server
 		if !sess.IsEqual(StateReady) {
 			log.Debugf("try connecting session %s(%s)", sess.ID, sess.Address)
-			if err = sess.Connect(svr.ctx); err != nil {
+			if err = sess.Connect(svr.ctx, svr.handshake); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
 				log.Infof("session %s connect successful", sess.ID)
@@ -212,6 +253,11 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 	if err = svr.getServeInfo(svr.ctx); err != nil {
 		return
 	}
+	svr.wireguard = newWireguard(svr.cfg.Wireguard)
+	if err = svr.wireguard.Mount(svr.ctx); err != nil {
+		log.Debugf("mount warp endpoint error: %s", err.Error())
+		err = nil
+	}
 	svr.routes()
 	svr.waitGroup.Go(svr.checkSession)
 	svr.waitGroup.Go(svr.eventLoop)
@@ -220,11 +266,13 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 
 func (svr *Server) Stop() (err error) {
 	svr.cancelFunc()
+	err = svr.wireguard.Umount()
 	return
 }
 
-func New() *Server {
+func New(cfg *config.Config) *Server {
 	svr := &Server{
+		cfg:      cfg,
 		info:     &NodeInfo{Uptime: time.Now()},
 		Uptime:   time.Now(),
 		sessions: make(map[string]*Session),

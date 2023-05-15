@@ -58,7 +58,7 @@ func (sess *Session) IsEqual(state int32) bool {
 	return atomic.LoadInt32(&sess.State) == state
 }
 
-func (sess *Session) Connect(ctx context.Context) (err error) {
+func (sess *Session) Connect(ctx context.Context, handshake Handshake) (err error) {
 	var (
 		conn *Connection
 	)
@@ -70,7 +70,7 @@ func (sess *Session) Connect(ctx context.Context) (err error) {
 	}()
 	atomic.AddInt32(&sess.Tires, 1)
 	sess.State = StatePadding
-	conn = NewConnection(sess.secretKey, sess.info)
+	conn = NewConnection(sess.secretKey, sess.info, handshake)
 	if err = conn.Dial(ctx, sess.Proto, sess.Address); err != nil {
 		sess.State = StateUnavailable
 		sess.LastAttemptTime = time.Now()

@@ -45,6 +45,7 @@ type Connection struct {
 	activeStamp int64
 	closeFlag   int32
 	mutex       sync.Mutex
+	handshake   Handshake
 	closeChan   chan struct{}
 }
 
@@ -75,35 +76,13 @@ func (conn *Connection) nextSequence() uint16 {
 	return conn.sequence
 }
 
-func (conn *Connection) handshake(request *packet.Frame, stream multiplex.Stream) (rwc io.ReadWriteCloser, err error) {
-	var (
-		timeout time.Duration
-	)
-	req := &packet.HandshakeRequest{}
-	if err = json.Unmarshal(request.Buf, req); err != nil {
-		return
-	}
-	timeout = req.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	res := &packet.HandshakeResponse{
-		Host: req.Host,
-	}
-	if rwc, err = net.DialTimeout("tcp", req.Host, timeout); err == nil {
-		res.Success = true
-		err = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
-	} else {
-		res.Reason = err.Error()
-		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
-	}
-	return
-}
-
 func (conn *Connection) handlePing(request *packet.Frame, stream multiplex.Stream) {
 	var (
 		err error
 	)
+	defer func() {
+		err = stream.Close()
+	}()
 	if err = packet.WriteFrame(
 		stream,
 		packet.NewFrame(
@@ -121,12 +100,15 @@ func (conn *Connection) handleTraffic(request *packet.Frame, stream multiplex.St
 		err    error
 		remote io.ReadWriteCloser
 	)
+	defer func() {
+		err = stream.Close()
+	}()
 	if remote, err = conn.handshake(request, stream); err != nil {
 		log.Debugf("connection %s handshake error: %s", conn.ID(), err.Error())
 		return
 	}
 	defer func() {
-		err = stream.Close()
+		err = remote.Close()
 	}()
 	errChan := make(chan error, 2)
 	go conn.pipe(remote, stream, errChan)
@@ -146,7 +128,6 @@ func (conn *Connection) process(stream multiplex.Stream) {
 	atomic.StoreInt64(&conn.activeStamp, time.Now().Unix())
 	atomic.AddInt32(&conn.concurrency, 1)
 	defer func() {
-		err = stream.Close()
 		atomic.AddInt32(&conn.concurrency, -1)
 	}()
 	if frame, err = packet.ReadFrame(stream); err != nil {
@@ -159,6 +140,7 @@ func (conn *Connection) process(stream multiplex.Stream) {
 		conn.handleTraffic(frame, stream)
 	default:
 		log.Debugf("connection %s receive unsupported request: %0x", conn.ID(), frame.Type)
+		err = stream.Close()
 	}
 	return
 }
@@ -230,11 +212,13 @@ func (conn *Connection) IoLoop(ctx context.Context) error {
 	}
 }
 
-func NewConnection(secretKey []byte, info *NodeInfo) *Connection {
-	return &Connection{
+func NewConnection(secretKey []byte, info *NodeInfo, h Handshake) *Connection {
+	conn := &Connection{
 		id:        xid.New().String(),
+		handshake: h,
 		info:      info,
 		secretKey: secretKey,
 		closeChan: make(chan struct{}),
 	}
+	return conn
 }
