@@ -104,7 +104,6 @@ func (conn *Connection) handleTraffic(request *packet.Frame, stream multiplex.St
 		err = stream.Close()
 	}()
 	if remote, err = conn.handshake(request, stream); err != nil {
-		log.Debugf("connection %s handshake error: %s", conn.ID(), err.Error())
 		return
 	}
 	defer func() {
@@ -202,7 +201,7 @@ func (conn *Connection) Close() (err error) {
 	return
 }
 
-func (conn *Connection) IoLoop(ctx context.Context) error {
+func (conn *Connection) Serve(ctx context.Context) error {
 	for {
 		if stream, err := conn.conn.AcceptStream(ctx); err != nil {
 			return err

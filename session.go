@@ -97,7 +97,7 @@ func (sess *Session) Connect(ctx context.Context, handshake Handshake) (err erro
 }
 
 func (sess *Session) Receive(ctx context.Context, conn *Connection) {
-	if err := conn.IoLoop(ctx); err != nil {
+	if err := conn.Serve(ctx); err != nil {
 		log.Warnf("session %s io error: %s", sess.ID, err.Error())
 		err = sess.Close()
 	}

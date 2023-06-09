@@ -76,11 +76,12 @@ func (svr *Server) handshake(request *packet.Frame, stream multiplex.Stream) (rw
 	} else {
 		res.Reason = err.Error()
 		_ = packet.WriteFrame(stream, packet.NewFrame(packet.TypeHandshakeResponse, request.Sequence, res))
+		log.Debugf("handshake %s error: %s", req.Host, err.Error())
 	}
 	return
 }
 
-func (svr *Server) readSessionSnapshot() []*Session {
+func (svr *Server) getSessionSnapshot() []*Session {
 	svr.mutex.RLock()
 	defer svr.mutex.RUnlock()
 	ss := make([]*Session, 0, len(svr.sessions))
@@ -94,7 +95,7 @@ func (svr *Server) domainName() string {
 	return env.Get("NRGO_DOMAIN", svr.software.Domain)
 }
 
-func (svr *Server) extGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
+func (svr *Server) lookupGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
 	info = &GeoInfo{}
 	err = retry.Do(func() error {
 		return fetch.Request(
@@ -124,7 +125,7 @@ func (svr *Server) initConfig(ctx context.Context) (err error) {
 	)
 }
 
-func (svr *Server) prepare(ctx context.Context) (err error) {
+func (svr *Server) initialization(ctx context.Context) (err error) {
 	var (
 		buf []byte
 		geo *GeoInfo
@@ -132,7 +133,7 @@ func (svr *Server) prepare(ctx context.Context) (err error) {
 	if err = svr.initConfig(svr.ctx); err != nil {
 		return
 	}
-	if geo, err = svr.extGeoInfo(ctx); err == nil {
+	if geo, err = svr.lookupGeoInfo(ctx); err == nil {
 		svr.info.Country = geo.CountryCode
 		svr.info.IP = geo.IP
 	}
@@ -214,7 +215,7 @@ func (svr *Server) checkSession() {
 	for _, sess := range svr.sessions {
 		// if session is closed, try reconnecting to server
 		if !sess.IsEqual(StateReady) {
-			log.Debugf("try connecting session %s(%s)", sess.ID, sess.Address)
+			log.Debugf("session %s(%s) connecting", sess.ID, sess.Address)
 			if err = sess.Connect(svr.ctx, svr.handshake); err != nil {
 				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
 			} else {
@@ -226,7 +227,7 @@ func (svr *Server) checkSession() {
 
 func (svr *Server) eventLoop() {
 	refreshTicker := time.NewTicker(time.Minute * 20)
-	eventTicker := time.NewTicker(time.Second * 20)
+	eventTicker := time.NewTicker(time.Second * 10)
 	defer func() {
 		refreshTicker.Stop()
 		eventTicker.Stop()
@@ -247,16 +248,18 @@ func (svr *Server) eventLoop() {
 
 func (svr *Server) Start(ctx context.Context) (err error) {
 	svr.ctx, svr.cancelFunc = context.WithCancel(ctx)
-	if err = svr.prepare(svr.ctx); err != nil {
+	if err = svr.initialization(svr.ctx); err != nil {
 		return
 	}
 	if err = svr.getServeInfo(svr.ctx); err != nil {
 		return
 	}
-	svr.wireguard = newWireguard(svr.cfg.Wireguard)
-	if err = svr.wireguard.Mount(svr.ctx); err != nil {
-		log.Debugf("mount warp endpoint error: %s", err.Error())
-		err = nil
+	if !svr.cfg.Direct {
+		svr.wireguard = newWireguard(svr.cfg.Wireguard)
+		if err = svr.wireguard.Mount(svr.ctx); err != nil {
+			log.Debugf("mount warp endpoint error: %s", err.Error())
+			err = nil
+		}
 	}
 	svr.routes()
 	svr.waitGroup.Go(svr.checkSession)
@@ -266,7 +269,12 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 
 func (svr *Server) Stop() (err error) {
 	svr.cancelFunc()
-	err = svr.wireguard.Umount()
+	if !svr.cfg.Direct {
+		err = svr.wireguard.Umount()
+	}
+	for _, sess := range svr.sessions {
+		err = sess.Close()
+	}
 	return
 }
 
