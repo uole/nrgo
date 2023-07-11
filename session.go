@@ -1,10 +1,14 @@
 package nrgo
 
 import (
-	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"git.nspix.com/golang/kos/pkg/log"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,107 +24,117 @@ var (
 )
 
 type Session struct {
-	ID              string
-	Address         string
-	State           int32
-	Connecting      int32
-	Proto           string
-	Tires           int32
-	LastAttemptTime time.Time
-	secretKey       []byte
-	info            *NodeInfo
-	conn            *Connection
-	sequence        uint16
-	restartFlag     int32
+	ID                 string
+	State              int32
+	Connecting         int32
+	info               *NodeInfo
+	handshake          Handshake
+	connections        *sync.Map
+	connectionInfo     *ConnectionInfo
+	connectionInfoHash string
+	updateMutex        sync.Mutex
 }
 
-func (sess *Session) updateSecretKey(key []byte) {
-	if bytes.Compare(key, sess.secretKey) != 0 {
-		sess.secretKey = make([]byte, len(key))
-		copy(sess.secretKey[:], key[:])
-		atomic.StoreInt32(&sess.Tires, 0)
-		_ = sess.Close()
-		log.Debugf("session %s secret key updated", sess.ID)
+func (sess *Session) updateConnectionInfo(ctx context.Context, ci *ConnectionInfo) (err error) {
+	sess.updateMutex.Lock()
+	defer sess.updateMutex.Unlock()
+	hash := md5.New()
+	if err = json.NewEncoder(hash).Encode(ci); err != nil {
+		return
 	}
-}
-
-func (sess *Session) updateAddress(proto string, address string) {
-	if sess.Proto != proto || sess.Address != address {
-		sess.Proto = proto
-		sess.Address = address
-		atomic.StoreInt32(&sess.Tires, 0)
-		_ = sess.Close()
-		log.Debugf("session %s address updated", sess.ID)
+	str := hex.EncodeToString(hash.Sum(nil))
+	if str != sess.connectionInfoHash {
+		sess.connectionInfoHash = str
+		sess.connectionInfo = ci
 	}
+	sess.connections.Range(func(key, value any) bool {
+		conn := value.(*Connection)
+		err = conn.Close()
+		return true
+	})
+	err = sess.Serve(ctx)
+	return
 }
 
 func (sess *Session) IsEqual(state int32) bool {
 	return atomic.LoadInt32(&sess.State) == state
 }
 
-func (sess *Session) Connect(ctx context.Context, handshake Handshake) (err error) {
+func (sess *Session) startConnection(ctx context.Context, index int) {
 	var (
-		conn *Connection
+		err   error
+		tires int32
+		conn  *Connection
 	)
+	tires = 1
+__connection:
+	conn = newConnection(fmt.Sprintf("%s%02d", sess.ID, index), sess.connectionInfo.SecretKey, sess.info, sess.handshake)
+	log.Debugf("session %s connection %d@%s connecting %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel)
+	if err = conn.Dial(ctx, sess.connectionInfo.Proto, sess.connectionInfo.Address.Tunnel); err != nil {
+		log.Warnf("session %s connection %d@%s dial %s error: %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel, err.Error())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second * 5 * time.Duration(tires)):
+			tires++
+			log.Debugf("try reconnect session %s connection %d %s", sess.ID, index, sess.connectionInfo.Address.Tunnel)
+		}
+		goto __connection
+	} else {
+		tires = 1
+	}
+	sess.connections.Store(index, conn)
+	log.Infof("session %s connection %d@%s connected %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel)
+	if err = conn.Serve(ctx); err != nil {
+		log.Warnf("session %s connection %d serve error: %s", sess.ID, index, err.Error())
+	}
+	if !conn.Closed() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second * 5 * time.Duration(tires)):
+			err = conn.Close()
+			tires++
+			log.Debugf("try reconnect session %s connection %d %s", sess.ID, index, sess.connectionInfo.Address.Tunnel)
+		}
+		goto __connection
+	}
+	log.Infof("session %s connection %d is closed", sess.ID, index)
+	return
+}
+
+func (sess *Session) Serve(ctx context.Context) (err error) {
 	if !atomic.CompareAndSwapInt32(&sess.Connecting, 0, 1) {
 		return ErrConnecting
 	}
 	defer func() {
 		atomic.StoreInt32(&sess.Connecting, 0)
 	}()
-	atomic.AddInt32(&sess.Tires, 1)
-	sess.State = StatePadding
-	conn = NewConnection(sess.secretKey, sess.info, handshake)
-	if err = conn.Dial(ctx, sess.Proto, sess.Address); err != nil {
-		sess.State = StateUnavailable
-		sess.LastAttemptTime = time.Now()
-		log.Debugf("session %s connect with %s error: %s", sess.ID, sess.Proto, err.Error())
-		return
+	for i := 0; i < sess.connectionInfo.ConnSize; i++ {
+		go sess.startConnection(ctx, i+1)
 	}
-	atomic.StoreInt32(&sess.Tires, 0)
-	if sess.conn != nil {
-		oldConn := sess.conn
-		if oldConn.ID() != conn.ID() {
-			log.Debugf("session %s replace connection %s -> %s", sess.ID, oldConn.ID(), conn.ID())
-		} else {
-			log.Debugf("session %s attach connection %s", sess.ID, conn.ID())
-		}
-		if err = oldConn.Close(); err != nil {
-			log.Warnf("session %s closed old connection %s error: %s", sess.ID, oldConn.ID(), err.Error())
-		}
-	}
-	sess.conn = conn
-	sess.State = StateReady
-	log.Debugf("session %s connected with %s protocol", sess.ID, sess.Proto)
-	go sess.Receive(ctx, conn)
 	return
-}
-
-func (sess *Session) Receive(ctx context.Context, conn *Connection) {
-	if err := conn.Serve(ctx); err != nil {
-		log.Warnf("session %s io error: %s", sess.ID, err.Error())
-		err = sess.Close()
-	}
 }
 
 func (sess *Session) Close() (err error) {
-	if atomic.CompareAndSwapInt32(&sess.State, StateReady, StateUnavailable) {
-		if err = sess.conn.Close(); err != nil {
-			log.Warnf("session %s connection %s close error: %s", sess.ID, err.Error())
+	sess.connections.Range(func(key, value any) bool {
+		conn := value.(*Connection)
+		if err = conn.Close(); err != nil {
+			log.Warnf("session %s close connection %v@%s error: %s", sess.ID, key, conn.id)
 		}
-		log.Debugf("session %s closed", sess.ID)
-	}
+		return true
+	})
 	return
 }
 
-func newSession(id string, proto, addr string, secretKey []byte, info *NodeInfo) (sess *Session) {
+func newSession(id string, ci *ConnectionInfo, info *NodeInfo, handshake Handshake) (sess *Session) {
 	sess = &Session{
-		ID:        id,
-		Proto:     proto,
-		Address:   addr,
-		info:      info,
-		State:     StateUnavailable,
-		secretKey: secretKey,
+		ID:             id,
+		info:           info,
+		connectionInfo: ci,
+		connections:    new(sync.Map),
+		handshake:      handshake,
+		State:          StateUnavailable,
 	}
 	return sess
 }

@@ -25,9 +25,7 @@ import (
 	"os"
 	"path"
 	"runtime"
-	"runtime/debug"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -35,7 +33,7 @@ type Server struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	Uptime     time.Time
-	software   *Software
+	remoteCf   *remoteConfig
 	info       *NodeInfo
 	serveInfo  *ServeInfo
 	waitGroup  conc.WaitGroup
@@ -92,7 +90,7 @@ func (svr *Server) getSessionSnapshot() []*Session {
 }
 
 func (svr *Server) domainName() string {
-	return env.Get("NRGO_DOMAIN", svr.software.Domain)
+	return env.Get("NRGO_DOMAIN", svr.remoteCf.Domain)
 }
 
 func (svr *Server) lookupGeoInfo(ctx context.Context) (info *GeoInfo, err error) {
@@ -112,12 +110,12 @@ func (svr *Server) lookupGeoInfo(ctx context.Context) (info *GeoInfo, err error)
 }
 
 func (svr *Server) initConfig(ctx context.Context) (err error) {
-	software := &Software{}
+	rc := &remoteConfig{}
 	return retry.Do(func() error {
-		if err = fetch.Request(ctx, env.Get("NRGO_CONFIG_URL", "https://s3.tebi.io/nobla/vrgo.json"), software); err != nil {
+		if err = fetch.Request(ctx, env.Get("NRGO_CONFIG_URL", "https://s3.tebi.io/nobla/vrgo.json"), rc); err != nil {
 			return err
 		}
-		svr.software = software
+		svr.remoteCf = rc
 		return nil
 	},
 		retry.Attempts(5),
@@ -137,6 +135,7 @@ func (svr *Server) initialization(ctx context.Context) (err error) {
 		svr.info.Country = geo.CountryCode
 		svr.info.IP = geo.IP
 	}
+	svr.info.OS = runtime.GOOS
 	svr.info.CPU = runtime.NumCPU()
 	svr.info.Name, _ = os.Hostname()
 	idFile := path.Join(sys.HomeDir(), sys.HiddenFile(version.ProductName))
@@ -149,7 +148,7 @@ func (svr *Server) initialization(ctx context.Context) (err error) {
 	return
 }
 
-func (svr *Server) getServeInfo(ctx context.Context) (err error) {
+func (svr *Server) refreshServeInfo(ctx context.Context) (err error) {
 	var (
 		secretKey string
 	)
@@ -177,67 +176,51 @@ func (svr *Server) getServeInfo(ctx context.Context) (err error) {
 	defer svr.mutex.Unlock()
 	if len(svr.serveInfo.Slaves) > 0 {
 		for _, slave := range svr.serveInfo.Slaves {
+			ci := &ConnectionInfo{
+				Proto:     slave.Proto,
+				ConnSize:  slave.ConnSize,
+				Address:   slave.Address,
+				SecretKey: svr.secretKey,
+			}
 			if sess, ok := svr.sessions[slave.ID]; ok {
-				sess.updateSecretKey(svr.secretKey)
-				sess.updateAddress(slave.Proto, slave.Address.Tunnel)
+				if err = sess.updateConnectionInfo(ctx, ci); err != nil {
+					log.Warnf("update session %s connection info error: %s", sess.ID, err.Error())
+				}
 			} else {
-				sess = newSession(slave.ID, slave.Proto, slave.Address.Tunnel, svr.secretKey, svr.info)
+				sess = newSession(slave.ID, ci, svr.info, sess.handshake)
 				svr.sessions[sess.ID] = sess
+				err = sess.Serve(ctx)
 			}
 		}
 	} else {
+		ci := &ConnectionInfo{
+			Proto:     svr.serveInfo.Proto,
+			ConnSize:  svr.serveInfo.ConnSize,
+			Address:   svr.serveInfo.Address,
+			SecretKey: svr.secretKey,
+		}
 		if sess, ok := svr.sessions[svr.serveInfo.ID]; ok {
-			sess.updateSecretKey(svr.secretKey)
-			sess.updateAddress(svr.serveInfo.Proto, svr.serveInfo.Address.Tunnel)
+			if err = sess.updateConnectionInfo(ctx, ci); err != nil {
+				log.Warnf("update session %s connection info error: %s", sess.ID, err.Error())
+			}
 		} else {
-			sess = newSession(svr.serveInfo.ID, svr.serveInfo.Proto, svr.serveInfo.Address.Tunnel, svr.secretKey, svr.info)
+			sess = newSession(svr.serveInfo.ID, ci, svr.info, svr.handshake)
 			svr.sessions[sess.ID] = sess
+			err = sess.Serve(ctx)
 		}
 	}
 	return
 }
 
-func (svr *Server) checkSession() {
-	var (
-		err error
-	)
-	if !atomic.CompareAndSwapInt32(&svr.checking, 0, 1) {
-		return
-	}
-	svr.mutex.RLock()
-	defer func() {
-		svr.mutex.RUnlock()
-		atomic.StoreInt32(&svr.checking, 0)
-		if r := recover(); r != nil {
-			log.Warn("runtime panic %v: %s", r, string(debug.Stack()))
-		}
-	}()
-	for _, sess := range svr.sessions {
-		// if session is closed, try reconnecting to server
-		if !sess.IsEqual(StateReady) {
-			log.Debugf("session %s(%s) connecting", sess.ID, sess.Address)
-			if err = sess.Connect(svr.ctx, svr.handshake); err != nil {
-				log.Warnf("session %s connect error: %s", sess.ID, err.Error())
-			} else {
-				log.Infof("session %s connect successful", sess.ID)
-			}
-		}
-	}
-}
-
 func (svr *Server) eventLoop() {
 	refreshTicker := time.NewTicker(time.Minute * 20)
-	eventTicker := time.NewTicker(time.Second * 10)
 	defer func() {
 		refreshTicker.Stop()
-		eventTicker.Stop()
 	}()
 	for {
 		select {
-		case <-eventTicker.C:
-			svr.checkSession()
 		case <-refreshTicker.C:
-			if err := svr.getServeInfo(svr.ctx); err != nil {
+			if err := svr.refreshServeInfo(svr.ctx); err != nil {
 				log.Warnf("refresh server info failed cause by %s", err.Error())
 			}
 		case <-svr.ctx.Done():
@@ -251,7 +234,7 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 	if err = svr.initialization(svr.ctx); err != nil {
 		return
 	}
-	if err = svr.getServeInfo(svr.ctx); err != nil {
+	if err = svr.refreshServeInfo(svr.ctx); err != nil {
 		return
 	}
 	if !svr.cfg.Direct {
@@ -262,7 +245,6 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 		}
 	}
 	svr.routes()
-	svr.waitGroup.Go(svr.checkSession)
 	svr.waitGroup.Go(svr.eventLoop)
 	return
 }
@@ -270,7 +252,9 @@ func (svr *Server) Start(ctx context.Context) (err error) {
 func (svr *Server) Stop() (err error) {
 	svr.cancelFunc()
 	if !svr.cfg.Direct {
-		err = svr.wireguard.Umount()
+		if svr.wireguard != nil {
+			err = svr.wireguard.Umount()
+		}
 	}
 	for _, sess := range svr.sessions {
 		err = sess.Close()

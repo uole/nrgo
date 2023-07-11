@@ -3,21 +3,22 @@ package nrgo
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"git.nspix.com/golang/kos/pkg/log"
+	"git.nspix.com/golang/kos/util/bs"
 	"git.nspix.com/golang/kos/util/pool"
-	"github.com/rs/xid"
+	"github.com/uole/nrgo/internal/sequence"
 	"github.com/uole/nrgo/pkg/multiplex"
 	"github.com/uole/nrgo/pkg/multiplex/kcp"
 	"github.com/uole/nrgo/pkg/multiplex/quic"
 	"github.com/uole/nrgo/pkg/multiplex/tcp"
 	"github.com/uole/nrgo/pkg/packet"
 	"io"
-	"math"
 	"net"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -41,10 +42,8 @@ type Connection struct {
 	info        *NodeInfo
 	dialer      net.Dialer
 	concurrency int32
-	sequence    uint16
 	activeStamp int64
 	closeFlag   int32
-	mutex       sync.Mutex
 	handshake   Handshake
 	closeChan   chan struct{}
 }
@@ -64,16 +63,6 @@ func (conn *Connection) pipe(dst, src io.ReadWriteCloser, ch chan<- error) {
 	case ch <- err:
 	}
 	return
-}
-
-func (conn *Connection) nextSequence() uint16 {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.sequence++
-	if conn.sequence >= math.MaxUint16 {
-		conn.sequence = 0
-	}
-	return conn.sequence
 }
 
 func (conn *Connection) handlePing(request *packet.Frame, stream multiplex.Stream) {
@@ -144,12 +133,12 @@ func (conn *Connection) process(stream multiplex.Stream) {
 	return
 }
 
-func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error) {
+func (conn *Connection) Dial(ctx context.Context, network, addr string) (err error) {
 	var (
 		buf   []byte
 		frame *packet.Frame
 	)
-	switch proto {
+	switch network {
 	case protoQUIC:
 		conn.conn, err = quic.Dial(ctx, addr)
 	case protoKCP:
@@ -166,6 +155,7 @@ func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error
 	}
 	req := &packet.RegisterRequest{
 		ID:      conn.info.ID,
+		TID:     conn.id,
 		OS:      runtime.GOOS,
 		Name:    conn.info.Name,
 		Country: conn.info.Country,
@@ -173,7 +163,11 @@ func (conn *Connection) Dial(ctx context.Context, proto, addr string) (err error
 		CPU:     conn.info.CPU,
 		Uptime:  conn.info.Uptime,
 	}
-	if err = conn.conn.WriteMessage(packet.NewFrame(packet.TypeRegisterRequest, conn.nextSequence(), req).Bytes()); err != nil {
+	hash := md5.New()
+	hash.Write(conn.secretKey)
+	hash.Write(bs.StringToBytes(conn.id))
+	req.Secret = hex.EncodeToString(hash.Sum(nil))
+	if err = conn.conn.WriteMessage(packet.NewFrame(packet.TypeRegisterRequest, sequence.Next(), req).Bytes()); err != nil {
 		return
 	}
 	if buf, err = conn.conn.ReadMessage(); err != nil {
@@ -201,6 +195,10 @@ func (conn *Connection) Close() (err error) {
 	return
 }
 
+func (conn *Connection) Closed() bool {
+	return atomic.LoadInt32(&conn.closeFlag) == 1
+}
+
 func (conn *Connection) Serve(ctx context.Context) error {
 	for {
 		if stream, err := conn.conn.AcceptStream(ctx); err != nil {
@@ -211,9 +209,9 @@ func (conn *Connection) Serve(ctx context.Context) error {
 	}
 }
 
-func NewConnection(secretKey []byte, info *NodeInfo, h Handshake) *Connection {
+func newConnection(id string, secretKey []byte, info *NodeInfo, h Handshake) *Connection {
 	conn := &Connection{
-		id:        xid.New().String(),
+		id:        id,
 		handshake: h,
 		info:      info,
 		secretKey: secretKey,

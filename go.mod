@@ -3,7 +3,7 @@ module github.com/uole/nrgo
 go 1.20
 
 require (
-	git.nspix.com/golang/kos v0.0.3
+	git.nspix.com/golang/kos v0.0.9
 	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/golang/snappy v0.0.4
 	github.com/quic-go/quic-go v0.34.0
@@ -13,6 +13,7 @@ require (
 	github.com/uole/smux v0.0.1
 	github.com/xtaci/kcp-go v5.4.20+incompatible
 	golang.org/x/crypto v0.4.0
+	golang.org/x/sync v0.1.0
 	golang.zx2c4.com/wireguard v0.0.0-20220829161405-d1d08426b27b
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -27,6 +28,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/onsi/ginkgo/v2 v2.2.0 // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/peterh/liner v1.2.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qtls-go1-19 v0.3.2 // indirect

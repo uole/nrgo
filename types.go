@@ -10,20 +10,21 @@ import (
 type (
 	Handshake func(*packet.Frame, multiplex.Stream) (io.ReadWriteCloser, error)
 
-	Software struct {
+	remoteConfig struct {
 		Version string `json:"version"`
 		Domain  string `json:"domain"`
 	}
 
 	Address struct {
-		Proxy  string `json:"proxy"`
-		Tunnel string `json:"tunnel"`
+		Client string `json:"client,omitempty"`
+		Tunnel string `json:"tunnel,omitempty"`
 	}
 
 	ServeInfo struct {
 		ID        string      `json:"id"`
 		Proto     string      `json:"proto"`
 		Address   Address     `json:"address"`
+		ConnSize  int         `json:"conn_size"`
 		SecretKey string      `json:"secretKey"`
 		Slaves    []SlaveInfo `json:"slaves"`
 		Uptime    time.Time   `json:"uptime"`
@@ -36,14 +37,23 @@ type (
 		State    string    `json:"state"`
 		Proto    string    `yaml:"proto"`
 		Address  Address   `json:"address"`
+		ConnSize int       `json:"conn_size"`
 		Uptime   time.Time `json:"uptime"`
 		PingTime time.Time `json:"ping_time"`
+	}
+
+	ConnectionInfo struct {
+		Proto     string  `json:"proto"`
+		ConnSize  int     `json:"conn_size"`
+		Address   Address `json:"address"`
+		SecretKey []byte  `json:"secret_key"`
 	}
 
 	NodeInfo struct {
 		ID      string    `json:"id"`
 		Name    string    `json:"name"`
 		Country string    `json:"country"`
+		OS      string    `json:"os"`
 		IP      string    `json:"ip"`
 		CPU     int       `json:"cpu"`
 		Uptime  time.Time `json:"uptime"`

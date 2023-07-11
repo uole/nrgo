@@ -57,6 +57,7 @@ func main() {
 	svr := kos.Init(
 		kos.WithName("github.com/uole/nrgo", version.Version),
 		kos.WithServer(nrgo.New(cfg)),
+		kos.WithDirectHttp(),
 	)
 	if err = svr.Run(); err != nil {
 		fmt.Println(err)
