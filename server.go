@@ -137,13 +137,21 @@ func (svr *Server) initialization(ctx context.Context) (err error) {
 	}
 	svr.info.OS = runtime.GOOS
 	svr.info.CPU = runtime.NumCPU()
-	svr.info.Name, _ = os.Hostname()
-	idFile := path.Join(sys.HomeDir(), sys.HiddenFile(version.ProductName))
-	if buf, err = os.ReadFile(idFile); err == nil {
-		svr.info.ID = string(buf)
+	if os.Getenv("NRGO_NODE_ID") != "" {
+		svr.info.ID = os.Getenv("NRGO_NODE_ID")
 	} else {
-		svr.info.ID = xid.New().String()
-		err = os.WriteFile(idFile, []byte(svr.info.ID), 0644)
+		idFile := path.Join(sys.HomeDir(), sys.HiddenFile(version.ProductName))
+		if buf, err = os.ReadFile(idFile); err == nil {
+			svr.info.ID = string(buf)
+		} else {
+			svr.info.ID = xid.New().String()
+			err = os.WriteFile(idFile, []byte(svr.info.ID), 0644)
+		}
+	}
+	if os.Getenv("NRGO_NODE_NAME") != "" {
+		svr.info.Name = os.Getenv("NRGO_NODE_NAME")
+	} else {
+		svr.info.Name, _ = os.Hostname()
 	}
 	return
 }
