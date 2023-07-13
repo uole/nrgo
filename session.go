@@ -69,7 +69,7 @@ func (sess *Session) startConnection(ctx context.Context, index int) {
 	tires = 1
 __connection:
 	conn = newConnection(fmt.Sprintf("%s%02d", sess.ID, index), sess.connectionInfo.SecretKey, sess.info, sess.handshake)
-	log.Debugf("session %s connection %d@%s connecting %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel)
+	log.Debugf("session %s connection %d@%s connecting %s://%s", sess.ID, index, conn.id, sess.connectionInfo.Proto, sess.connectionInfo.Address.Tunnel)
 	if err = conn.Dial(ctx, sess.connectionInfo.Proto, sess.connectionInfo.Address.Tunnel); err != nil {
 		log.Warnf("session %s connection %d@%s dial %s error: %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel, err.Error())
 		select {
