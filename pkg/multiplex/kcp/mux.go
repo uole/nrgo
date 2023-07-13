@@ -24,7 +24,8 @@ type (
 )
 
 func (sess *Session) initSession() {
-	sess.sess, _ = smux.Client(sess.conn, nil)
+	cfg := smux.DefaultConfig()
+	sess.sess, _ = smux.Client(sess.conn, cfg)
 	atomic.StoreInt32(&sess.takeover, 1)
 }
 
@@ -70,7 +71,11 @@ func (sess *Session) Addr() net.Addr {
 }
 
 func (sess *Session) Close() error {
-	return sess.conn.Close()
+	if sess.sess != nil {
+		return sess.sess.Close()
+	} else {
+		return sess.conn.Close()
+	}
 }
 
 func newSession(conn net.Conn) *Session {

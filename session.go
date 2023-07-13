@@ -75,7 +75,7 @@ __connection:
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second * 5 * time.Duration(tires)):
+		case <-time.After(time.Second * time.Duration(tires*5)):
 			tires++
 			log.Debugf("try reconnect session %s connection %d %s", sess.ID, index, sess.connectionInfo.Address.Tunnel)
 		}
@@ -84,18 +84,18 @@ __connection:
 		tires = 1
 	}
 	sess.connections.Store(index, conn)
-	log.Infof("session %s connection %d@%s connected %s", sess.ID, index, conn.id, sess.connectionInfo.Address.Tunnel)
+	log.Infof("session %s connection %s@%d connected %s", sess.ID, conn.id, index, sess.connectionInfo.Address.Tunnel)
 	if err = conn.Serve(ctx); err != nil {
-		log.Warnf("session %s connection %d serve error: %s", sess.ID, index, err.Error())
+		log.Warnf("session %s connection %s@%d serve error: %s", sess.ID, conn.id, index, err.Error())
 	}
 	if !conn.Closed() {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second * 5 * time.Duration(tires)):
+		case <-time.After(time.Second * time.Duration(tires*5)):
 			err = conn.Close()
 			tires++
-			log.Debugf("try reconnect session %s connection %d %s", sess.ID, index, sess.connectionInfo.Address.Tunnel)
+			log.Debugf("session %s connection %d try reconnect %s", sess.ID, index, sess.connectionInfo.Address.Tunnel)
 		}
 		goto __connection
 	}

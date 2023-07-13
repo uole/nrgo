@@ -86,7 +86,7 @@ func (conn *Conn) tryRead() (err error) {
 		return
 	}
 	if head[0] != Ver {
-		err = fmt.Errorf("unsupported packet %0x", head[0])
+		err = fmt.Errorf("invalid stream protocol version 0x%02X", head[0])
 		return
 	}
 	flag = head[1]
