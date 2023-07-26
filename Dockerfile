@@ -7,7 +7,7 @@ RUN go env -w GO111MODULE=on; \
     go env -w GOPROXY=https://goproxy.cn,direct; \
     sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories; \
     mkdir -p ${DIR}; \
-    apk add --update --no-cache make
+    apk add --update --no-cache git make
 
 COPY . ${DIR}
 
