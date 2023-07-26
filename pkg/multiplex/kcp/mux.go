@@ -25,7 +25,7 @@ type (
 
 func (sess *Session) initSession() {
 	cfg := smux.DefaultConfig()
-	sess.sess, _ = smux.Client(sess.conn, cfg)
+	sess.sess, _ = smux.Server(sess.conn, cfg)
 	atomic.StoreInt32(&sess.takeover, 1)
 }
 

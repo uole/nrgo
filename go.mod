@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	git.nspix.com/golang/kos v0.0.9
+	git.nspix.com/golang/yamux v0.1.2
 	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/golang/snappy v0.0.4
 	github.com/quic-go/quic-go v0.34.0
@@ -13,7 +14,6 @@ require (
 	github.com/uole/smux v0.0.1
 	github.com/xtaci/kcp-go v5.4.20+incompatible
 	golang.org/x/crypto v0.4.0
-	golang.org/x/sync v0.1.0
 	golang.zx2c4.com/wireguard v0.0.0-20220829161405-d1d08426b27b
 	gopkg.in/yaml.v3 v3.0.1
 )

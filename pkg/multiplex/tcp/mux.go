@@ -2,9 +2,10 @@ package tcp
 
 import (
 	"context"
+	"git.nspix.com/golang/kos/pkg/log"
+	"git.nspix.com/golang/yamux"
+	"github.com/uole/nrgo/internal/crypto"
 	"github.com/uole/nrgo/pkg/multiplex"
-	"github.com/uole/nrgo/pkg/stream"
-	"github.com/uole/smux"
 	"io"
 	"net"
 	"sync"
@@ -19,26 +20,38 @@ type (
 
 	Session struct {
 		conn     net.Conn
-		sess     *smux.Session
+		sess     *yamux.Session
 		once     sync.Once
+		key      []byte
 		takeover int32
 	}
 )
 
 func (sess *Session) initSession() {
-	cfg := smux.DefaultConfig()
-	sess.sess, _ = smux.Client(sess.conn, cfg)
+	var (
+		err error
+	)
+	cfg := yamux.DefaultConfig()
+	cfg.MaxStreamWindowSize = 512 * 1024
+	cfg.Logger = log.GetLogger()
+	cfg.LogOutput = nil
+	if sess.key != nil {
+		cfg.Crypto = crypto.NewXorEncrypt(sess.key)
+	}
+	if sess.sess, err = yamux.Server(sess.conn, cfg); err != nil {
+		panic("create mux error:" + err.Error())
+	}
 	atomic.StoreInt32(&sess.takeover, 1)
 }
 
 func (sess *Session) OpenStream(ctx context.Context) (multiplex.Stream, error) {
 	sess.once.Do(sess.initSession)
-	return sess.sess.OpenStream(ctx)
+	return sess.sess.OpenStream()
 }
 
 func (sess *Session) AcceptStream(ctx context.Context) (multiplex.Stream, error) {
 	sess.once.Do(sess.initSession)
-	return sess.sess.AcceptStream(ctx)
+	return sess.sess.AcceptStreamWithContext(ctx)
 }
 
 func (sess *Session) ReadMessage() ([]byte, error) {
@@ -80,8 +93,8 @@ func (sess *Session) Close() error {
 	}
 }
 
-func newSession(conn net.Conn) *Session {
-	sess := &Session{conn: conn}
+func newSession(conn net.Conn, key []byte) *Session {
+	sess := &Session{conn: conn, key: key}
 	return sess
 }
 
@@ -90,9 +103,9 @@ func (l *Listener) Accept(ctx context.Context) (multiplex.Session, error) {
 		return nil, err
 	} else {
 		if l.opts.Key == nil {
-			return newSession(conn), nil
+			return newSession(conn, nil), nil
 		} else {
-			return newSession(stream.New(conn, stream.WithEncrypt(l.opts.Key))), nil
+			return newSession(conn, l.opts.Key), nil
 		}
 	}
 }

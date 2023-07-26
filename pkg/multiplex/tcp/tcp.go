@@ -3,7 +3,6 @@ package tcp
 import (
 	"context"
 	"github.com/uole/nrgo/pkg/multiplex"
-	"github.com/uole/nrgo/pkg/stream"
 	"net"
 )
 
@@ -37,9 +36,9 @@ func Dial(ctx context.Context, addr string, cbs ...Option) (multiplex.Session, e
 		return nil, err
 	} else {
 		if opts.Key != nil {
-			return newSession(stream.New(conn, stream.WithEncrypt(opts.Key))), nil
+			return newSession(conn, opts.Key), nil
 		} else {
-			return newSession(conn), nil
+			return newSession(conn, nil), nil
 		}
 	}
 }
